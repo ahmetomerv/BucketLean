@@ -54,8 +54,10 @@ The image includes Perl for the vendored ExifTool. Structured scan, job, and ite
 
 ```sh
 npm test
-npm run typecheck
-npm run build
+npm run test:coverage
+npm run check
 ```
 
-The automated tests use local JPEG fixtures and mocked R2 operations. They do not write to a real bucket. A live backup and conditional replacement still need a small, explicitly started test job in your own R2 bucket.
+The suite covers the dashboard actions, HTTP authentication and validation, scan persistence and recovery, candidate filtering, image and metadata validation, backup verification, replacement reconciliation, and database migration. Tests use temporary SQLite databases, local JPEG fixtures, and mocked R2 operations. They do not need R2 credentials or write to a real bucket. `npm run check` runs coverage, typechecking, a production build, and a built-server smoke check; GitHub Actions runs it on Node 22 and 24. The coverage gate catches large regressions, but a passing percentage alone does not prove every failure mode is covered.
+
+A live backup and conditional replacement still need a small, explicitly started test job in your own R2 bucket. The automated tests do not exercise Cloudflare's S3 implementation, deployment configuration, or a browser against a running production server.

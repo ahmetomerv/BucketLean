@@ -44,3 +44,20 @@ test('MozJPEG output preserves dimensions, camera EXIF, and ICC profile', async 
 test('rejects a non-JPEG input', async () => {
   await expect(optimizeImage(Buffer.from('not an image'), 'balanced', true)).rejects.toThrow()
 })
+
+test('can intentionally strip photo metadata when preservation is disabled', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'r2-image-strip-test-'))
+  try {
+    const path = join(dir, 'source.jpg')
+    await writeFile(path, await sharp({ create: { width: 160, height: 120, channels: 3, background: '#cc9966' } })
+      .jpeg({ quality: 100 }).toBuffer())
+    await exiftool.write(path, { Make: 'Test Camera', Model: 'Model Two' })
+    const output = await optimizeImage(await readFile(path), 'aggressive', false)
+    expect(output).toMatchObject({ width: 160, height: 120 })
+    const resultPath = join(dir, 'result.jpg')
+    await writeFile(resultPath, output.output)
+    const tags = await exiftool.read(resultPath)
+    expect(tags.Make).toBeUndefined()
+    expect(tags.Model).toBeUndefined()
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})

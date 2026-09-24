@@ -87,3 +87,43 @@ test('excludes reserved backup objects from JPEG candidates', () => {
   expect(isJpegKey('__optimizer/originals/a.jpg')).toBe(false)
   expect(isJpegKey('photos/a.JPEG')).toBe(true)
 })
+
+test('records a listing failure and keeps the last committed page', async () => {
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof ListObjectsV2Command) {
+      if (command.input.ContinuationToken === 'second') throw new Error('R2 listing unavailable')
+      return { Contents: [{ Key: 'failed/first.jpg', Size: 100, ETag: '"first"' }], IsTruncated: true, NextContinuationToken: 'second' }
+    }
+    if (command instanceof HeadObjectCommand) return { Metadata: {} }
+    throw new Error('Unexpected command')
+  })
+  const { scan } = enqueueScan('failed/')
+  await runNextScan()
+  const db = getDatabase()
+  expect(db.select().from(scans).where(eq(scans.id, scan.id)).get()).toMatchObject({
+    status: 'failed', cursor: 'second', discoveredCount: 1, jpegCount: 1, error: 'R2 listing unavailable',
+  })
+  expect(db.select().from(objects).where(eq(objects.scanId, scan.id)).all()).toHaveLength(1)
+})
+
+test('restarts an interrupted first page from the beginning without duplicate rows', async () => {
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof ListObjectsV2Command) return {
+      Contents: [{ Key: 'restart/first.jpg', Size: 200, ETag: '"current"' }, { Key: 'restart/second.jpg', Size: 300 }],
+      IsTruncated: false,
+    }
+    if (command instanceof HeadObjectCommand) return { Metadata: {} }
+    throw new Error('Unexpected command')
+  })
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'restart/', status: 'running', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({ scanId: scan.id, key: 'restart/first.jpg', size: 100, etag: '"old"', isJpeg: true,
+    isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
+  await runNextScan()
+  expect(db.select().from(scans).where(eq(scans.id, scan.id)).get()).toMatchObject({ status: 'completed', discoveredCount: 2, jpegCount: 2 })
+  const rows = db.select().from(objects).where(eq(objects.scanId, scan.id)).all()
+  expect(rows).toHaveLength(2)
+  expect(rows.find(row => row.key === 'restart/first.jpg')).toMatchObject({ size: 200, etag: '"current"' })
+})

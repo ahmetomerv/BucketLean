@@ -100,3 +100,137 @@ test('reconciles an upload completed before the worker could save its result', a
   expect(getJobSummary(job.id)).toMatchObject({ completed: 1, failed: 0, savedBytes: 30 })
   expect(send.mock.calls.some(([command]) => command instanceof PutObjectCommand)).toBe(false)
 })
+
+test('selects only known, unoptimized JPEGs matching a literal prefix and size', async () => {
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: '', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  const candidates = [
+    { key: 'photos/%-eligible.jpg', size: 200, isJpeg: true, isOptimized: false, metadataStatus: 'known' },
+    { key: 'photos/%-small.jpg', size: 50, isJpeg: true, isOptimized: false, metadataStatus: 'known' },
+    { key: 'photos/%-unknown.jpg', size: 200, isJpeg: true, isOptimized: null, metadataStatus: 'unknown' },
+    { key: 'photos/%-done.jpg', size: 200, isJpeg: true, isOptimized: true, metadataStatus: 'known' },
+    { key: 'photos/%-text.txt', size: 200, isJpeg: false, isOptimized: null, metadataStatus: 'not_applicable' },
+    { key: 'photos/x-other.jpg', size: 200, isJpeg: true, isOptimized: false, metadataStatus: 'known' },
+  ] as const
+  for (const candidate of candidates) db.insert(objects).values({ ...candidate, scanId: scan.id, etag: '"old"', discoveredAt: new Date().toISOString() }).run()
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) return { ETag: '"changed"', ContentLength: 200, Metadata: {} }
+    throw new Error('Ineligible candidate reached R2')
+  })
+  const { job, count } = enqueueJob({ prefix: 'photos/%-', minBytes: 100, preset: 'balanced',
+    minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
+  expect(count).toBe(1)
+  await runNextJob()
+  expect(db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).all()).toMatchObject([
+    { key: 'photos/%-eligible.jpg', status: 'skipped', error: 'Object changed since the scan' },
+  ])
+  expect(send.mock.calls.some(([command]) => command instanceof PutObjectCommand)).toBe(false)
+})
+
+test('refuses to replace a source when the backup readback differs', async () => {
+  const key = 'safety/backup-mismatch.jpg'
+  const original = Buffer.alloc(100, 4)
+  let source = original
+  let backup: Buffer | undefined
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) return { ETag: '"old"', ContentLength: source.length, Metadata: {} }
+    if (command instanceof GetObjectCommand) {
+      const bytes = command.input.Key === key ? source : backup
+      if (!bytes) throw new Error('Missing backup')
+      return { ETag: '"old"', ContentLength: bytes.length, Body: { transformToByteArray: async () => bytes } }
+    }
+    if (command instanceof PutObjectCommand) {
+      if (command.input.Key === key) { source = Buffer.from(command.input.Body as Buffer); return {} }
+      backup = Buffer.alloc(100, 8)
+      return {}
+    }
+    throw new Error('Unexpected command')
+  })
+  compress.mockResolvedValue({ output: Buffer.alloc(70, 4), width: 10, height: 10 })
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'safety/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({ key, scanId: scan.id, etag: '"old"', size: 100, isJpeg: true,
+    isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
+  const { job } = enqueueJob({ prefix: 'safety/', minBytes: 0, preset: 'balanced',
+    minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ completed: 0, failed: 1 })
+  expect(db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()?.error).toBe('Backup verification failed')
+  expect(source).toEqual(original)
+  expect(send.mock.calls.filter(([command]) => command instanceof PutObjectCommand && command.input.Key === key)).toHaveLength(0)
+})
+
+test('reconciles a successful replacement whose PUT response was lost', async () => {
+  const key = 'safety/lost-response.jpg'
+  const original = Buffer.alloc(100, 5)
+  let source = original
+  let sourceEtag = '"old"'
+  let sourceMetadata: Record<string, string> = {}
+  let backup: Buffer | undefined
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) return { ETag: sourceEtag, ContentLength: source.length, Metadata: sourceMetadata }
+    if (command instanceof GetObjectCommand) {
+      const bytes = command.input.Key === key ? source : backup
+      if (!bytes) throw new Error('Missing backup')
+      return { ETag: command.input.Key === key ? sourceEtag : '"backup"', ContentLength: bytes.length,
+        Body: { transformToByteArray: async () => bytes } }
+    }
+    if (command instanceof PutObjectCommand) {
+      if (command.input.Key === key) {
+        source = Buffer.from(command.input.Body as Buffer)
+        sourceEtag = '"new"'
+        sourceMetadata = command.input.Metadata ?? {}
+        throw new Error('Connection dropped after upload')
+      }
+      backup = Buffer.from(command.input.Body as Buffer)
+      return {}
+    }
+    throw new Error('Unexpected command')
+  })
+  compress.mockResolvedValue({ output: Buffer.alloc(70, 5), width: 10, height: 10 })
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'safety/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({ key, scanId: scan.id, etag: '"old"', size: 100, isJpeg: true,
+    isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
+  const { job } = enqueueJob({ prefix: key, minBytes: 0, preset: 'balanced',
+    minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ completed: 1, failed: 0, savedBytes: 30 })
+  expect(source.length).toBe(70)
+  expect(backup).toEqual(original)
+  expect(send.mock.calls.filter(([command]) => command instanceof PutObjectCommand && command.input.Key === key)).toHaveLength(1)
+})
+
+test('accepts a matching preexisting backup but never overwrites a source changed before replacement', async () => {
+  const key = 'safety/conflict.jpg'
+  const original = Buffer.alloc(100, 6)
+  let changed = false
+  const preconditionFailed = { $metadata: { httpStatusCode: 412 } }
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) return { ETag: changed ? '"external"' : '"old"', ContentLength: 100, Metadata: {} }
+    if (command instanceof GetObjectCommand) return { ETag: '"old"', ContentLength: 100,
+      Body: { transformToByteArray: async () => original } }
+    if (command instanceof PutObjectCommand) {
+      if (command.input.Key === key) changed = true
+      throw preconditionFailed
+    }
+    throw new Error('Unexpected command')
+  })
+  compress.mockResolvedValue({ output: Buffer.alloc(70, 6), width: 10, height: 10 })
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'safety/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({ key, scanId: scan.id, etag: '"old"', size: 100, isJpeg: true,
+    isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
+  const { job } = enqueueJob({ prefix: key, minBytes: 0, preset: 'balanced',
+    minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
+  await runNextJob()
+  const item = db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()
+  expect(item).toMatchObject({ status: 'failed', error: 'Object changed before replacement; verified backup was retained' })
+  expect(item?.backupKey).toBeTruthy()
+  expect(changed).toBe(true)
+  expect(db.select().from(objects).where(eq(objects.key, key)).get()?.isOptimized).toBe(false)
+})
