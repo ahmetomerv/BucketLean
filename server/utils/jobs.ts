@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm'
 import {
-  GetObjectCommand, HeadObjectCommand, PutObjectCommand,
+  HeadObjectCommand, PutObjectCommand,
   type HeadObjectCommandOutput, type S3Client,
 } from '@aws-sdk/client-s3'
 import { getDatabase } from './db'
@@ -14,8 +15,9 @@ import { prefixCondition } from './query'
 import { workerLease, WorkerLeaseLostError } from './worker-lease'
 import { classifyFailure, MAX_TRANSIENT_FAILURES, retryDelayMs, SourceChangedError } from './failures'
 import { ensureBackupManifest, headersFromHead, makeBackupManifest, manifestKeyForBackup } from './backup-manifest'
+import { downloadToTempFile, MAX_IMAGE_BYTES } from './download'
 
-const MAX_IMAGE_BYTES = 128 * 1024 * 1024
+const JOB_ITEM_BATCH_SIZE = 100
 type Client = Pick<S3Client, 'send'>
 type Job = typeof optimizationJobs.$inferSelect
 type Item = typeof optimizationItems.$inferSelect
@@ -42,27 +44,36 @@ export function enqueueJob(input: { prefix: string, minBytes: number, preset: Pr
   if (activeJob) throw new Error('Resolve the existing optimization job before creating another')
   const scan = db.select().from(scans).where(eq(scans.status, 'completed')).orderBy(desc(scans.id)).get()
   if (!scan) throw new Error('Complete a scan before creating a job')
-  const candidates = db.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects).where(and(
-    eq(objects.scanId, scan.id), eq(objects.isJpeg, true), eq(objects.isOptimized, false),
-    eq(objects.metadataStatus, 'known'), prefixCondition(input.prefix), sql`${objects.size} >= ${input.minBytes}`,
-  )).orderBy(asc(objects.key)).all()
-  if (!candidates.length) throw new Error('No eligible JPEGs match the filters')
   const now = new Date().toISOString()
-  const job = db.transaction((tx) => {
+  const { job, count } = db.transaction((tx) => {
+    const conditions = and(eq(objects.scanId, scan.id), eq(objects.isJpeg, true), eq(objects.isOptimized, false),
+      eq(objects.metadataStatus, 'known'), prefixCondition(input.prefix), sql`${objects.size} >= ${input.minBytes}`)
+    const firstBatch = tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
+      .where(conditions).orderBy(asc(objects.key)).limit(JOB_ITEM_BATCH_SIZE).all()
+    if (!firstBatch.length) throw new Error('No eligible JPEGs match the filters')
     const created = tx.insert(optimizationJobs).values({
       scanId: scan.id, prefix: input.prefix, minBytes: input.minBytes,
       status: 'queued', preset: input.preset, minimumSavingPercent: input.minimumSavingPercent,
       backupOriginals: true, preserveMetadata: input.preserveMetadata, createdAt: now,
     }).returning().get()
-    for (const candidate of candidates) tx.insert(optimizationItems).values({
-      jobId: created.id, key: candidate.key, etag: candidate.etag,
-      originalSize: candidate.size, status: 'pending', createdAt: now,
-    }).run()
-    return created
+    let batch = firstBatch
+    let count = 0
+    while (batch.length) {
+      tx.insert(optimizationItems).values(batch.map(candidate => ({
+        jobId: created.id, key: candidate.key, etag: candidate.etag,
+        originalSize: candidate.size, status: 'pending' as const, createdAt: now,
+      }))).run()
+      count += batch.length
+      if (batch.length < JOB_ITEM_BATCH_SIZE) break
+      const lastKey = batch[batch.length - 1]!.key
+      batch = tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
+        .where(and(conditions, gt(objects.key, lastKey))).orderBy(asc(objects.key)).limit(JOB_ITEM_BATCH_SIZE).all()
+    }
+    return { job: created, count }
   })
-  log('info', 'job_queued', { jobId: job.id, scanId: scan.id, candidates: candidates.length })
+  log('info', 'job_queued', { jobId: job.id, scanId: scan.id, candidates: count })
   void runNextJob()
-  return { job, count: candidates.length }
+  return { job, count }
 }
 
 export function enqueueReconciliation(jobId: number) {
@@ -136,16 +147,6 @@ export function getJobSummary(jobId: number) {
     savedPercent: savedBytes === null ? null : counts.originalBytes ? Math.round(100 * savedBytes / counts.originalBytes) : 0 }
 }
 
-async function readObject(client: Client, bucket: string, key: string, ifMatch?: string) {
-  const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key, IfMatch: ifMatch }))
-  if (!result.Body) throw new Error(`R2 returned an empty body for ${key}`)
-  if (result.ContentLength != null && result.ContentLength > MAX_IMAGE_BYTES) throw new Error('Image exceeds 128 MiB safety limit')
-  const bytes = Buffer.from(await result.Body.transformToByteArray())
-  if (bytes.length > MAX_IMAGE_BYTES) throw new Error('Image exceeds 128 MiB safety limit')
-  if (result.ContentLength != null && bytes.length !== result.ContentLength) throw new Error('R2 download length mismatch')
-  return { bytes, etag: result.ETag }
-}
-
 function contentHeaders(head: HeadObjectCommandOutput) {
   return {
     ContentType: head.ContentType ?? 'image/jpeg',
@@ -167,9 +168,11 @@ async function ensureBackup(client: Client, bucket: string, key: string, origina
   } catch (error) {
     if (!isPreconditionFailure(error)) throw error
   }
-  const backup = await readObject(client, bucket, key)
-  workerLease.assertOwned()
-  if (backup.bytes.length !== original.length || digest(backup.bytes) !== digest(original)) throw new Error('Backup verification failed')
+  const backup = await downloadToTempFile(client, bucket, key)
+  try {
+    workerLease.assertOwned()
+    if (backup.size !== original.length || backup.sha256 !== digest(original)) throw new Error('Backup verification failed')
+  } finally { await backup.dispose() }
   const backupHead = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
   workerLease.assertOwned()
   if (!isDeepStrictEqual(headersFromHead(backupHead), headersFromHead(head))) {
@@ -205,18 +208,27 @@ async function reconcileRemoteState(client: Client, bucket: string, job: Job, it
     throw new Error('Persisted upload intent is incomplete; inspect source and backup manually')
   }
   workerLease.assertOwned()
-  const source = await readObject(client, bucket, item.key, head.ETag)
-  workerLease.assertOwned()
-  const sourceHash = digest(source.bytes)
+  const source = await downloadToTempFile(client, bucket, item.key, head.ETag)
+  let sourceHash: string
+  let sourceSize: number
+  try {
+    workerLease.assertOwned()
+    sourceHash = source.sha256
+    sourceSize = source.size
+  } finally { await source.dispose() }
   let backupMissing = false
-  let backup: Awaited<ReturnType<typeof readObject>> | undefined
-  try { backup = await readObject(client, bucket, item.backupKey) }
+  let backup: { sha256: string } | undefined
+  try {
+    const downloadedBackup = await downloadToTempFile(client, bucket, item.backupKey)
+    try { backup = { sha256: downloadedBackup.sha256 } }
+    finally { await downloadedBackup.dispose() }
+  }
   catch (error) {
     if (isNotFound(error)) backupMissing = true
     else throw error
   }
   workerLease.assertOwned()
-  if (backup && digest(backup.bytes) !== item.originalSha256) throw new Error('Backup hash differs from the recorded original')
+  if (backup && backup.sha256 !== item.originalSha256) throw new Error('Backup hash differs from the recorded original')
   if (backup && !item.backupVerifiedAt) {
     getDatabase().update(optimizationItems).set({ backupVerifiedAt: new Date().toISOString() })
       .where(eq(optimizationItems.id, item.id)).run()
@@ -228,11 +240,11 @@ async function reconcileRemoteState(client: Client, bucket: string, job: Job, it
     if (backupMissing) throw new Error('Optimized source is present, but its original backup is missing')
     const backupHead = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.backupKey }))
     await verifyManifest(client, bucket, job, item, item.backupKey, item.originalSha256, item.originalSize, backupHead)
-    markCompleted(job, item, source.bytes.length, head.ETag ?? null)
+    markCompleted(job, item, sourceSize, head.ETag ?? null)
     return 'completed' as const
   }
   if (sourceHash === item.originalSha256 && etag(head.ETag) === etag(item.etag) &&
-    source.bytes.length === item.originalSize && !head.Metadata?.['image-optimizer-version']) {
+    sourceSize === item.originalSize && !head.Metadata?.['image-optimizer-version']) {
     if (backupMissing && item.backupVerifiedAt) getDatabase().update(optimizationItems)
       .set({ backupVerifiedAt: null }).where(eq(optimizationItems.id, item.id)).run()
     return 'original' as const
@@ -262,14 +274,20 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
     return
   }
   db.update(optimizationItems).set({ status: 'downloading', startedAt: item.startedAt ?? new Date().toISOString(), error: null }).where(eq(optimizationItems.id, item.id)).run()
-  const downloaded = await readObject(client, bucket, item.key, item.etag)
-  workerLease.assertOwned()
-  if (etag(downloaded.etag) !== etag(item.etag) || downloaded.bytes.length !== item.originalSize) throw new SourceChangedError('Original changed during download')
+  const downloaded = await downloadToTempFile(client, bucket, item.key, item.etag)
+  let original: Buffer
+  try {
+    workerLease.assertOwned()
+    if (etag(downloaded.etag) !== etag(item.etag) || downloaded.size !== item.originalSize) {
+      throw new SourceChangedError('Original changed during download')
+    }
+    original = await readFile(downloaded.path)
+  } finally { await downloaded.dispose() }
   db.update(optimizationItems).set({ status: 'processing' }).where(eq(optimizationItems.id, item.id)).run()
-  const { output } = await optimizeImage(downloaded.bytes, job.preset as Preset, job.preserveMetadata)
+  const { output } = await optimizeImage(original, job.preset as Preset, job.preserveMetadata)
   workerLease.assertOwned()
-  const savedPercent = Math.round(100 * (downloaded.bytes.length - output.length) / downloaded.bytes.length)
-  if (output.length > downloaded.bytes.length * (1 - job.minimumSavingPercent / 100)) {
+  const savedPercent = Math.round(100 * (original.length - output.length) / original.length)
+  if (output.length > original.length * (1 - job.minimumSavingPercent / 100)) {
     db.update(optimizationItems).set({ status: 'skipped', optimizedSize: output.length, savedPercent,
       error: 'Saving below threshold', finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
     log('info', 'item_skipped', { jobId: job.id, itemId: item.id, reason: 'saving_below_threshold' })
@@ -277,15 +295,15 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
   }
   const backupKey = `__optimizer/originals/${job.id}/${createHash('sha256').update(item.key).digest('hex')}.jpg`
   const manifestKey = manifestKeyForBackup(backupKey)
-  const originalSha256 = digest(downloaded.bytes)
+  const originalSha256 = downloaded.sha256
   const optimizedSha256 = digest(output)
   db.update(optimizationItems).set({ status: 'uploading', backupKey, manifestKey, originalSha256, optimizedSha256,
     optimizedSize: output.length, savedPercent, backupVerifiedAt: null, manifestVerifiedAt: null }).where(eq(optimizationItems.id, item.id)).run()
-  await ensureBackup(client, bucket, backupKey, downloaded.bytes, head)
+  await ensureBackup(client, bucket, backupKey, original, head)
   workerLease.assertOwned()
   const backupVerifiedAt = new Date().toISOString()
   db.update(optimizationItems).set({ backupVerifiedAt }).where(eq(optimizationItems.id, item.id)).run()
-  await verifyManifest(client, bucket, job, item, backupKey, originalSha256, downloaded.bytes.length, head)
+  await verifyManifest(client, bucket, job, item, backupKey, originalSha256, original.length, head)
   const metadata = {
     ...head.Metadata,
     'image-optimizer-version': '1',
@@ -293,7 +311,7 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
     'image-optimizer-date': new Date().toISOString(),
     'image-optimizer-job-id': String(job.id),
     'image-optimizer-item-id': String(item.id),
-    'original-size': String(downloaded.bytes.length),
+    'original-size': String(original.length),
   }
   const replacementAttemptedAt = item.replacementAttemptedAt ?? new Date().toISOString()
   db.update(optimizationItems).set({ replacementAttemptedAt }).where(eq(optimizationItems.id, item.id)).run()

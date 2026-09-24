@@ -5,12 +5,12 @@ A private, self-hosted Nuxt application for finding and recompressing JPEGs in o
 ## How it works
 
 1. Scan the whole bucket or a prefix. The scan lists objects and reads JPEG object metadata; it never writes to R2.
-2. Filter by key prefix and minimum file size. Only JPEGs confirmed as not previously optimized enter a job. Objects with unknown metadata are excluded.
+2. Filter by key prefix and minimum file size. Only JPEGs confirmed as not previously optimized enter a job. Objects with unknown metadata are excluded. Candidate keys are read and inserted into one SQLite transaction in batches of 100, so job creation does not hold the entire candidate list in memory.
 3. Start a job with Archival (90), Balanced (82), or Aggressive (72) JPEG quality. Balanced and a 15% minimum saving are the defaults.
 4. For each item, the worker checks that its ETag and size still match the scan, downloads it, inspects it with ExifTool, recompresses it, validates the complete JPEG and dimensions, and compares required EXIF and ICC metadata when preservation is enabled.
 5. If the saving reaches the threshold, the worker records the original and optimized SHA-256 hashes, stores and verifies the original under `__optimizer/originals/<job-id>/`, and saves a `backup_verified_at` timestamp. It also writes and reads back a JSON restore manifest under `__optimizer/manifests/<job-id>/` before replacing the source. The manifest maps the backup to the original key, SHA-256 hash, size, ETag, and original object headers and custom metadata. It saves `replacement_attempted_at` before conditionally replacing the source using its original ETag. It then reads back the source and backup and checks their hashes before marking the item complete. The backup and manifest writes use `If-None-Match: *`; the source write uses `If-Match`. [R2 supports these S3 conditional operations](https://developers.cloudflare.com/r2/api/s3/api/).
 
-The backup is mandatory in this MVP, even though the job schema reserves a backup setting. If a backup fails verification, the source is not replaced. An already optimized object or an image with insufficient savings is skipped. A source changed since the scan is recorded separately as `source_changed`; an invalid input JPEG is `invalid_jpeg`. One ordinary failed or uncertain item does not stop the others. Jobs resume unfinished items after a restart; an upload completed just before a crash is reconciled from its object metadata and the saved source and backup hashes. Objects larger than 128 MiB are skipped to bound worker memory.
+The backup is mandatory in this MVP, even though the job schema reserves a backup setting. If a backup fails verification, the source is not replaced. An already optimized object or an image with insufficient savings is skipped. A source changed since the scan is recorded separately as `source_changed`; an invalid input JPEG is `invalid_jpeg`. One ordinary failed or uncertain item does not stop the others. Jobs resume unfinished items after a restart; an upload completed just before a crash is reconciled from its object metadata and the saved source and backup hashes. Every image download streams to a private temporary file with a 128 MiB byte cap, including when R2 omits `Content-Length`. Verification hashes the streamed file without loading a second full image into memory. Compression still loads a capped original into memory and Sharp may use additional native memory for decoded pixels.
 
 ### Failures, retries, and pauses
 
@@ -92,7 +92,7 @@ If `DATABASE_PATH` is not set in `.env`, the script uses `.data/optimizer.sqlite
 | `APP_PASSWORD` | Private app password, required for all app access |
 | `DATABASE_PATH` | SQLite file path; defaults to `.data/optimizer.sqlite` locally |
 
-Do not put credentials in `NUXT_PUBLIC_*` variables. The app writes temporary image files to the system temporary directory and removes them after validation. The job details endpoint, `/api/jobs/<id>`, includes each item's status, error, and backup key for recovery.
+Do not put credentials in `NUXT_PUBLIC_*` variables. Provide writable system temporary storage for at least one 128 MiB download plus the image validation files. The worker removes temporary downloads after success or handled failure. The job details endpoint, `/api/jobs/<id>`, includes each item's status, error, and backup key for recovery.
 
 ## Coolify deployment
 
@@ -113,5 +113,13 @@ npm run check
 ```
 
 The suite covers the dashboard actions, HTTP authentication and validation, scan persistence and recovery, candidate filtering, image and metadata validation, backup and manifest verification, replacement reconciliation, durable retry deadlines and exhaustion, credential pause and resume, failure classification, bucket binding, worker lease takeover, SQLite snapshots, and database migration. Tests use temporary SQLite databases, local JPEG fixtures, and mocked R2 operations. They do not need R2 credentials or write to a real bucket. `npm run check` runs coverage, typechecking, a production build, and a built-server smoke check; GitHub Actions runs it on Node 22 and 24. The coverage gate catches large regressions, but a passing percentage alone does not prove every failure mode is covered.
+
+### Performance baseline
+
+On a local synthetic scan with 5,000 eligible keys, job creation made **0 R2 requests**. A single run before batching took 146 ms and added about 25 MiB of JavaScript heap; a single run after batching took 107 ms and added about 19 MiB. These are indicative process measurements, not a throughput guarantee. Reproduce the job-creation measurement with `PERF_BENCH=1 npx vitest run server/utils/jobs.test.ts -t 'measures large job creation'`.
+
+A read-only test-bucket download of an existing 8,060,807-byte backup through the capped stream took 905 ms and increased process RSS by about 25 MiB. This issued one `GetObject` command and included SDK setup and request overhead. No object was written during that check.
+
+The mocked successful optimization path makes **14 R2 operations**: the source and backup reads and writes, header checks, and manifest write/readback (including reconciliation). The test asserts that count after the download change; SDK retries can add requests in a live run. The backup remains a conditional `PutObject` followed by hash and header verification. A server-side copy could avoid uploading backup bytes, but [R2 destination copy conditions are beta and are not atomic relative to source conditions](https://developers.cloudflare.com/r2/api/s3/extensions/). Test copy behavior separately before considering that change, and retain backup verification.
 
 A live backup and conditional replacement still need a small, explicitly started test job in your own R2 bucket. The automated tests do not exercise Cloudflare's S3 implementation, deployment configuration, or a browser against a running production server. The recovery commands above provide a separate live manifest and restore check before you configure retention.

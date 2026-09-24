@@ -6,12 +6,13 @@ import { eq } from 'drizzle-orm'
 import { createHash } from 'node:crypto'
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3'
 
-const { send, compress, configFailure, manifestStore } = vi.hoisted(() => ({
-  send: vi.fn(), compress: vi.fn(), configFailure: vi.fn(), manifestStore: new Map<string, Buffer>(),
+const { send, compress, configFailure, manifestStore, manifestRequest } = vi.hoisted(() => ({
+  send: vi.fn(), compress: vi.fn(), configFailure: vi.fn(), manifestStore: new Map<string, Buffer>(), manifestRequest: vi.fn(),
 }))
 vi.mock('./r2', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./r2')>()
   const { GetObjectCommand, PutObjectCommand } = await import('@aws-sdk/client-s3')
+  const { Readable } = await import('node:stream')
   return { ...actual,
     r2Config: () => {
       const error = configFailure()
@@ -20,16 +21,22 @@ vi.mock('./r2', async (importOriginal) => {
     },
     createR2Client: () => ({ send: async (command: unknown) => {
       if (command instanceof PutObjectCommand && command.input.Key?.startsWith('__optimizer/manifests/')) {
+        manifestRequest(command)
         if (manifestStore.has(command.input.Key)) throw { $metadata: { httpStatusCode: 412 } }
         manifestStore.set(command.input.Key, Buffer.from(command.input.Body as Buffer))
         return {}
       }
       if (command instanceof GetObjectCommand && command.input.Key?.startsWith('__optimizer/manifests/')) {
+        manifestRequest(command)
         const bytes = manifestStore.get(command.input.Key)
         if (!bytes) throw { $metadata: { httpStatusCode: 404 } }
         return { ContentLength: bytes.length, Body: { transformToByteArray: async () => bytes } }
       }
-      return send(command)
+      const result = await send(command)
+      if (command instanceof GetObjectCommand && result?.Body && !(Symbol.asyncIterator in result.Body)) {
+        return { ...result, Body: Readable.from([await result.Body.transformToByteArray()]) }
+      }
+      return result
     }, destroy: vi.fn() }),
   }
 })
@@ -55,6 +62,7 @@ beforeEach(() => {
   compress.mockReset()
   configFailure.mockReset()
   manifestStore.clear()
+  manifestRequest.mockReset()
 })
 afterEach(() => {
   workerLease.release()
@@ -299,6 +307,13 @@ test('continues after backup failure, replaces only after verified backup, and s
     originalKey: 'photos/b.jpg', backupKey: completedItem.backupKey,
     sha256: completedItem.originalSha256, size: 100,
     headers: { contentType: 'image/jpeg', metadata: {} } })
+  const itemRequests = send.mock.calls.filter(([command]) =>
+    (command as HeadObjectCommand).input?.Key === 'photos/b.jpg' ||
+    (command as HeadObjectCommand).input?.Key === completedItem.backupKey).length
+  const itemManifestRequests = manifestRequest.mock.calls.filter(([command]) =>
+    (command as GetObjectCommand).input.Key === completedItem.manifestKey).length
+  expect({ itemRequests, itemManifestRequests, total: itemRequests + itemManifestRequests })
+    .toEqual({ itemRequests: 10, itemManifestRequests: 4, total: 14 })
 })
 
 test('does not replace a source when an existing manifest conflicts with its verified backup', async () => {
@@ -405,6 +420,50 @@ test('selects only known, unoptimized JPEGs matching a literal prefix and size',
     { key: 'photos/%-eligible.jpg', status: 'source_changed', errorKind: 'source_changed', error: 'Object changed since the scan' },
   ])
   expect(send.mock.calls.some(([command]) => command instanceof PutObjectCommand)).toBe(false)
+})
+
+test('creates more than two batches in key order', () => {
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'batch/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  db.transaction((tx) => {
+    for (let index = 204; index >= 0; index--) tx.insert(objects).values({
+      key: `batch/${String(index).padStart(3, '0')}.jpg`, scanId: scan.id, etag: '"old"', size: 100,
+      isJpeg: true, isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString(),
+    }).run()
+  })
+  const lease = vi.spyOn(workerLease, 'tryAcquire').mockReturnValue(false)
+  try {
+    const { job, count } = enqueueJob({ prefix: 'batch/', minBytes: 0, preset: 'balanced',
+      minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
+    expect(count).toBe(205)
+    const items = db.select({ key: optimizationItems.key }).from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).all()
+    expect(items.map(item => item.key)).toEqual(Array.from({ length: 205 }, (_, index) => `batch/${String(index).padStart(3, '0')}.jpg`))
+    expect(send).not.toHaveBeenCalled()
+  } finally { lease.mockRestore() }
+})
+
+test.skipIf(!process.env.PERF_BENCH)('measures large job creation without R2 requests', () => {
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'bench/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  db.transaction((tx) => {
+    for (let index = 0; index < 5000; index++) tx.insert(objects).values({
+      key: `bench/${String(index).padStart(6, '0')}.jpg`, scanId: scan.id, etag: '"old"', size: 100,
+      isJpeg: true, isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString(),
+    }).run()
+  })
+  const lease = vi.spyOn(workerLease, 'tryAcquire').mockReturnValue(false)
+  const before = process.memoryUsage()
+  const start = performance.now()
+  const result = enqueueJob({ prefix: 'bench/', minBytes: 0, preset: 'balanced',
+    minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
+  const elapsedMs = Math.round(performance.now() - start)
+  const after = process.memoryUsage()
+  lease.mockRestore()
+  expect(result.count).toBe(5000)
+  expect(send).not.toHaveBeenCalled()
+  console.log(JSON.stringify({ benchmark: 'create-5000-items', elapsedMs,
+    heapDeltaMiB: Math.round((after.heapUsed - before.heapUsed) / 1048576),
+    rssDeltaMiB: Math.round((after.rss - before.rss) / 1048576), r2Requests: send.mock.calls.length }))
 })
 
 test('refuses to replace a source when the backup readback differs', async () => {
