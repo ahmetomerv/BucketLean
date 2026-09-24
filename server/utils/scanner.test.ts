@@ -1,0 +1,89 @@
+import { afterAll, beforeAll, expect, test, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { eq } from 'drizzle-orm'
+
+const { send } = vi.hoisted(() => ({ send: vi.fn() }))
+vi.mock('./r2', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./r2')>()
+  return {
+    ...actual,
+    r2Config: () => ({ endpoint: 'https://example.r2.cloudflarestorage.com', bucket: 'test', accessKeyId: 'x', secretAccessKey: 'x' }),
+    createR2Client: () => ({ send, destroy: vi.fn() }),
+  }
+})
+
+import { HeadObjectCommand, ListObjectsV2Command } from './r2'
+import { closeDatabase, getDatabase } from './db'
+import { enqueueScan, isJpegKey, runNextScan } from './scanner'
+import { objects, scans } from './schema'
+
+let dir: string
+beforeAll(() => {
+  dir = mkdtempSync(join(tmpdir(), 'r2-optimizer-test-'))
+  process.env.DATABASE_PATH = join(dir, 'test.sqlite')
+})
+afterAll(() => { closeDatabase(); rmSync(dir, { recursive: true, force: true }); delete process.env.DATABASE_PATH })
+
+test('persists paginated JPEG discovery and treats metadata errors as unknown', async () => {
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof ListObjectsV2Command) {
+      if (!command.input.ContinuationToken) return {
+        Contents: [
+          { Key: 'photos/a.JPG', Size: 2_000_000, ETag: 'etag-a', LastModified: new Date('2026-01-01') },
+          { Key: 'photos/b.jpeg', Size: 3_000_000, ETag: 'etag-b' },
+        ], IsTruncated: true, NextContinuationToken: 'next',
+      }
+      return { Contents: [
+        { Key: 'photos/c.jpg', Size: 4_000_000 },
+        { Key: 'photos/readme.txt', Size: 100 },
+      ], IsTruncated: false }
+    }
+    if (command instanceof HeadObjectCommand) {
+      if (command.input.Key === 'photos/b.jpeg') return { Metadata: { 'image-optimizer-version': '1' } }
+      if (command.input.Key === 'photos/c.jpg') throw new Error('HeadObject unavailable')
+      return { Metadata: {} }
+    }
+    throw new Error('Unexpected command')
+  })
+
+  const { scan, created } = enqueueScan('photos/')
+  expect(created).toBe(true)
+  await runNextScan()
+  const db = getDatabase()
+  const finished = db.select().from(scans).where(eq(scans.id, scan.id)).get()
+  expect(finished).toMatchObject({ status: 'completed', discoveredCount: 4, jpegCount: 3, metadataErrorCount: 1 })
+  const rows = db.select().from(objects).where(eq(objects.scanId, scan.id)).all()
+  expect(rows.find(row => row.key === 'photos/a.JPG')).toMatchObject({ isJpeg: true, isOptimized: false, metadataStatus: 'known' })
+  expect(rows.find(row => row.key === 'photos/b.jpeg')).toMatchObject({ isJpeg: true, isOptimized: true, optimizerVersion: '1' })
+  expect(rows.find(row => row.key === 'photos/c.jpg')).toMatchObject({ isJpeg: true, isOptimized: null, metadataStatus: 'unknown' })
+  expect(rows.find(row => row.key === 'photos/readme.txt')).toMatchObject({ isJpeg: false, metadataStatus: 'not_applicable' })
+  expect(send.mock.calls.filter(([command]) => command instanceof HeadObjectCommand)).toHaveLength(3)
+})
+
+test('resumes a saved continuation token without repeating completed pages', async () => {
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof ListObjectsV2Command) {
+      expect(command.input.ContinuationToken).toBe('saved-page')
+      return { Contents: [{ Key: 'other/second.jpg', Size: 2_000_000 }], IsTruncated: false }
+    }
+    if (command instanceof HeadObjectCommand) return { Metadata: {} }
+    throw new Error('Unexpected command')
+  })
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'other/', status: 'running', cursor: 'saved-page', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({
+    scanId: scan.id, key: 'other/first.jpg', size: 1_000_000, isJpeg: true,
+    isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString(),
+  }).run()
+  await runNextScan()
+  expect(db.select().from(scans).where(eq(scans.id, scan.id)).get()).toMatchObject({ status: 'completed', discoveredCount: 2, jpegCount: 2 })
+  expect(send.mock.calls.filter(([command]) => command instanceof ListObjectsV2Command)).toHaveLength(1)
+})
+
+test('excludes reserved backup objects from JPEG candidates', () => {
+  expect(isJpegKey('__optimizer/originals/a.jpg')).toBe(false)
+  expect(isJpegKey('photos/a.JPEG')).toBe(true)
+})
