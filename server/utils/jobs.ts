@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
 import {
   GetObjectCommand, HeadObjectCommand, PutObjectCommand,
@@ -12,6 +13,7 @@ import { objects, optimizationItems, optimizationJobs, scans } from './schema'
 import { prefixCondition } from './query'
 import { workerLease, WorkerLeaseLostError } from './worker-lease'
 import { classifyFailure, MAX_TRANSIENT_FAILURES, retryDelayMs, SourceChangedError } from './failures'
+import { ensureBackupManifest, headersFromHead, makeBackupManifest, manifestKeyForBackup } from './backup-manifest'
 
 const MAX_IMAGE_BYTES = 128 * 1024 * 1024
 type Client = Pick<S3Client, 'send'>
@@ -168,6 +170,22 @@ async function ensureBackup(client: Client, bucket: string, key: string, origina
   const backup = await readObject(client, bucket, key)
   workerLease.assertOwned()
   if (backup.bytes.length !== original.length || digest(backup.bytes) !== digest(original)) throw new Error('Backup verification failed')
+  const backupHead = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+  workerLease.assertOwned()
+  if (!isDeepStrictEqual(headersFromHead(backupHead), headersFromHead(head))) {
+    throw new Error('Backup object headers differ from the original')
+  }
+}
+
+async function verifyManifest(client: Client, bucket: string, job: Job, item: Item, backupKey: string,
+  originalSha256: string, originalSize: number, backupHead: HeadObjectCommandOutput) {
+  workerLease.assertOwned()
+  const manifest = makeBackupManifest({ bucket, jobId: job.id, itemId: item.id, originalKey: item.key,
+    backupKey, originalETag: item.etag, sha256: originalSha256, size: originalSize, head: backupHead })
+  const manifestKey = await ensureBackupManifest(client, bucket, manifest)
+  workerLease.assertOwned()
+  getDatabase().update(optimizationItems).set({ manifestKey, manifestVerifiedAt: new Date().toISOString() })
+    .where(eq(optimizationItems.id, item.id)).run()
 }
 
 function markCompleted(job: Job, item: Item, optimizedSize: number, optimizedEtag: string | null) {
@@ -208,6 +226,8 @@ async function reconcileRemoteState(client: Client, bucket: string, job: Job, it
     head.Metadata?.['image-optimizer-item-id'] === String(item.id)
   if (sourceHash === item.optimizedSha256 && ownUpload) {
     if (backupMissing) throw new Error('Optimized source is present, but its original backup is missing')
+    const backupHead = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.backupKey }))
+    await verifyManifest(client, bucket, job, item, item.backupKey, item.originalSha256, item.originalSize, backupHead)
     markCompleted(job, item, source.bytes.length, head.ETag ?? null)
     return 'completed' as const
   }
@@ -256,14 +276,16 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
     return
   }
   const backupKey = `__optimizer/originals/${job.id}/${createHash('sha256').update(item.key).digest('hex')}.jpg`
+  const manifestKey = manifestKeyForBackup(backupKey)
   const originalSha256 = digest(downloaded.bytes)
   const optimizedSha256 = digest(output)
-  db.update(optimizationItems).set({ status: 'uploading', backupKey, originalSha256, optimizedSha256,
-    optimizedSize: output.length, savedPercent, backupVerifiedAt: null }).where(eq(optimizationItems.id, item.id)).run()
+  db.update(optimizationItems).set({ status: 'uploading', backupKey, manifestKey, originalSha256, optimizedSha256,
+    optimizedSize: output.length, savedPercent, backupVerifiedAt: null, manifestVerifiedAt: null }).where(eq(optimizationItems.id, item.id)).run()
   await ensureBackup(client, bucket, backupKey, downloaded.bytes, head)
   workerLease.assertOwned()
   const backupVerifiedAt = new Date().toISOString()
   db.update(optimizationItems).set({ backupVerifiedAt }).where(eq(optimizationItems.id, item.id)).run()
+  await verifyManifest(client, bucket, job, item, backupKey, originalSha256, downloaded.bytes.length, head)
   const metadata = {
     ...head.Metadata,
     'image-optimizer-version': '1',

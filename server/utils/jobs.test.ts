@@ -6,16 +6,31 @@ import { eq } from 'drizzle-orm'
 import { createHash } from 'node:crypto'
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3'
 
-const { send, compress, configFailure } = vi.hoisted(() => ({ send: vi.fn(), compress: vi.fn(), configFailure: vi.fn() }))
+const { send, compress, configFailure, manifestStore } = vi.hoisted(() => ({
+  send: vi.fn(), compress: vi.fn(), configFailure: vi.fn(), manifestStore: new Map<string, Buffer>(),
+}))
 vi.mock('./r2', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./r2')>()
+  const { GetObjectCommand, PutObjectCommand } = await import('@aws-sdk/client-s3')
   return { ...actual,
     r2Config: () => {
       const error = configFailure()
       if (error) throw error
       return { endpoint: 'https://example.r2.cloudflarestorage.com', bucket: 'test', accessKeyId: 'x', secretAccessKey: 'x' }
     },
-    createR2Client: () => ({ send, destroy: vi.fn() }),
+    createR2Client: () => ({ send: async (command: unknown) => {
+      if (command instanceof PutObjectCommand && command.input.Key?.startsWith('__optimizer/manifests/')) {
+        if (manifestStore.has(command.input.Key)) throw { $metadata: { httpStatusCode: 412 } }
+        manifestStore.set(command.input.Key, Buffer.from(command.input.Body as Buffer))
+        return {}
+      }
+      if (command instanceof GetObjectCommand && command.input.Key?.startsWith('__optimizer/manifests/')) {
+        const bytes = manifestStore.get(command.input.Key)
+        if (!bytes) throw { $metadata: { httpStatusCode: 404 } }
+        return { ContentLength: bytes.length, Body: { transformToByteArray: async () => bytes } }
+      }
+      return send(command)
+    }, destroy: vi.fn() }),
   }
 })
 vi.mock('./image', () => ({ qualities: { archival: 90, balanced: 82, aggressive: 72 }, optimizeImage: compress }))
@@ -39,6 +54,7 @@ beforeEach(() => {
   send.mockReset()
   compress.mockReset()
   configFailure.mockReset()
+  manifestStore.clear()
 })
 afterEach(() => {
   workerLease.release()
@@ -274,8 +290,64 @@ test('continues after backup failure, replaces only after verified backup, and s
   expect(store.get('photos/b.jpg')?.metadata['image-optimizer-version']).toBe('1')
   expect(db.select().from(objects).where(eq(objects.key, 'photos/b.jpg')).get()?.isOptimized).toBe(true)
   expect(db.select().from(optimizationItems).where(eq(optimizationItems.key, 'photos/b.jpg')).get()).toMatchObject({
-    status: 'completed', backupVerifiedAt: expect.any(String), replacementAttemptedAt: expect.any(String),
+    status: 'completed', backupVerifiedAt: expect.any(String), manifestVerifiedAt: expect.any(String),
+    manifestKey: expect.any(String), replacementAttemptedAt: expect.any(String),
   })
+  const completedItem = db.select().from(optimizationItems).where(eq(optimizationItems.key, 'photos/b.jpg')).get()!
+  const manifest = JSON.parse(manifestStore.get(completedItem.manifestKey!)!.toString('utf8'))
+  expect(manifest).toMatchObject({ version: 1, bucket: 'test', jobId: job.id, itemId: completedItem.id,
+    originalKey: 'photos/b.jpg', backupKey: completedItem.backupKey,
+    sha256: completedItem.originalSha256, size: 100,
+    headers: { contentType: 'image/jpeg', metadata: {} } })
+})
+
+test('does not replace a source when an existing manifest conflicts with its verified backup', async () => {
+  const key = 'manifest-conflict.jpg'
+  const original = Buffer.alloc(100, 4)
+  const { job, item } = queueOne(key)
+  const backupKey = `__optimizer/originals/${job.id}/${createHash('sha256').update(key).digest('hex')}.jpg`
+  const manifestKey = `__optimizer/manifests/${backupKey.slice('__optimizer/originals/'.length)}.json`
+  manifestStore.set(manifestKey, Buffer.from('{"unexpected":true}'))
+  let sourcePuts = 0
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) return { ETag: '"old"', ContentLength: 100, Metadata: {} }
+    if (command instanceof GetObjectCommand) return { ETag: '"old"', ContentLength: 100,
+      Body: { transformToByteArray: async () => original } }
+    if (command instanceof PutObjectCommand) {
+      if (command.input.Key === key) sourcePuts++
+      return {}
+    }
+    throw new Error('Unexpected command')
+  })
+  compress.mockResolvedValue({ output: Buffer.alloc(70, 4), width: 10, height: 10 })
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'needs_attention' }, needsAttention: 1 })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()?.manifestVerifiedAt).toBeNull()
+  expect(sourcePuts).toBe(0)
+})
+
+test('refuses replacement when the backup loses an original object header', async () => {
+  const key = 'header-mismatch.jpg'
+  const original = Buffer.alloc(100, 4)
+  let sourcePuts = 0
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) return { ETag: '"old"', ContentLength: 100,
+      CacheControl: command.input.Key === key ? 'private, max-age=60' : 'public', Metadata: {} }
+    if (command instanceof GetObjectCommand) return { ETag: '"old"', ContentLength: 100,
+      Body: { transformToByteArray: async () => original } }
+    if (command instanceof PutObjectCommand) {
+      if (command.input.Key === key) sourcePuts++
+      return {}
+    }
+    throw new Error('Unexpected command')
+  })
+  compress.mockResolvedValue({ output: Buffer.alloc(70, 4), width: 10, height: 10 })
+  const { job, item } = queueOne(key)
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'needs_attention' }, needsAttention: 1 })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()?.error)
+    .toBe('Backup object headers differ from the original')
+  expect(sourcePuts).toBe(0)
 })
 
 test('reconciles an upload completed before the worker could save its result', async () => {
@@ -379,7 +451,9 @@ test('reconciles a successful replacement whose PUT response was lost', async ()
   let backup: Buffer | undefined
   send.mockClear()
   send.mockImplementation(async (command: unknown) => {
-    if (command instanceof HeadObjectCommand) return { ETag: sourceEtag, ContentLength: source.length, Metadata: sourceMetadata }
+    if (command instanceof HeadObjectCommand) return command.input.Key === key
+      ? { ETag: sourceEtag, ContentLength: source.length, Metadata: sourceMetadata }
+      : { ETag: '"backup"', ContentLength: backup?.length, Metadata: {} }
     if (command instanceof GetObjectCommand) {
       const bytes = command.input.Key === key ? source : backup
       if (!bytes) throw new Error('Missing backup')

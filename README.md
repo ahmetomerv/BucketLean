@@ -8,7 +8,7 @@ A private, self-hosted Nuxt application for finding and recompressing JPEGs in o
 2. Filter by key prefix and minimum file size. Only JPEGs confirmed as not previously optimized enter a job. Objects with unknown metadata are excluded.
 3. Start a job with Archival (90), Balanced (82), or Aggressive (72) JPEG quality. Balanced and a 15% minimum saving are the defaults.
 4. For each item, the worker checks that its ETag and size still match the scan, downloads it, inspects it with ExifTool, recompresses it, validates the complete JPEG and dimensions, and compares required EXIF and ICC metadata when preservation is enabled.
-5. If the saving reaches the threshold, the worker records the original and optimized SHA-256 hashes, stores and verifies the original under `__optimizer/originals/<job-id>/`, and saves a `backup_verified_at` timestamp. It saves `replacement_attempted_at` before conditionally replacing the source using its original ETag. It then reads back the source and backup and checks their hashes before marking the item complete. The backup write uses `If-None-Match: *`; the source write uses `If-Match`. [R2 supports these S3 conditional operations](https://developers.cloudflare.com/r2/api/s3/api/).
+5. If the saving reaches the threshold, the worker records the original and optimized SHA-256 hashes, stores and verifies the original under `__optimizer/originals/<job-id>/`, and saves a `backup_verified_at` timestamp. It also writes and reads back a JSON restore manifest under `__optimizer/manifests/<job-id>/` before replacing the source. The manifest maps the backup to the original key, SHA-256 hash, size, ETag, and original object headers and custom metadata. It saves `replacement_attempted_at` before conditionally replacing the source using its original ETag. It then reads back the source and backup and checks their hashes before marking the item complete. The backup and manifest writes use `If-None-Match: *`; the source write uses `If-Match`. [R2 supports these S3 conditional operations](https://developers.cloudflare.com/r2/api/s3/api/).
 
 The backup is mandatory in this MVP, even though the job schema reserves a backup setting. If a backup fails verification, the source is not replaced. An already optimized object or an image with insufficient savings is skipped. A source changed since the scan is recorded separately as `source_changed`; an invalid input JPEG is `invalid_jpeg`. One ordinary failed or uncertain item does not stop the others. Jobs resume unfinished items after a restart; an upload completed just before a crash is reconciled from its object metadata and the saved source and backup hashes. Objects larger than 128 MiB are skipped to bound worker memory.
 
@@ -22,7 +22,7 @@ Job summaries count changed sources, invalid JPEGs, ordinary failures, and items
 
 ### Uncertain replacements and recovery
 
-An upload timeout does not prove whether R2 accepted the write. If a backup or replacement cannot be verified after the retry budget, or verification finds a mismatched object, the item becomes `needs_attention` and the job ends in `needs_attention` after the remaining items finish. The dashboard shows final bytes and savings as **Pending verification** while any item has an unknown replacement state. It blocks new scans and jobs until the uncertain job is resolved, so a new scan cannot hide a replacement that may already have happened. The job detail endpoint, `/api/jobs/<id>`, shows each item's error, error kind, retry fields, backup key, hashes, `backupVerifiedAt`, and `replacementAttemptedAt`.
+An upload timeout does not prove whether R2 accepted the write. If a backup, manifest, or replacement cannot be verified after the retry budget, or verification finds a mismatched object, the item becomes `needs_attention` and the job ends in `needs_attention` after the remaining items finish. The dashboard shows final bytes and savings as **Pending verification** while any item has an unknown replacement state. It blocks new scans and jobs until the uncertain job is resolved, so a new scan cannot hide a replacement that may already have happened. The job detail endpoint, `/api/jobs/<id>`, shows each item's error, error kind, retry fields, backup and manifest keys, hashes, `backupVerifiedAt`, `manifestVerifiedAt`, and `replacementAttemptedAt`.
 
 Use **Recheck remote state** on the dashboard, or `POST /api/jobs/<id>/reconcile`, after the R2 connection has recovered. The worker reads the source and backup, verifies both hashes, and checks the optimizer metadata. If the optimized source and its original backup match the saved intent, it completes the item without another source write. If the original still matches its recorded hash, ETag, and size, it may recreate a missing backup and retry the source write with the same conditional protection. A changed source, a mismatched backup, or an unavailable read stays `needs_attention`; inspect the two objects and the item error before rechecking again. Do not treat an uncertain item as a failed optimization or delete its backup until its remote state is established.
 
@@ -30,7 +30,33 @@ On first startup after this update, older `failed` items with a saved backup key
 
 The database is bound to one R2 endpoint and bucket. Startup refuses a different bucket or account endpoint, so old scan results cannot be used against another bucket. A SQLite worker lease chooses one process to run scans and jobs; it is renewed while that process is alive and can be claimed after expiry if the process crashes. A worker that loses the lease stops before further uploads, leaving unfinished work for the next owner. Conditional R2 replacement still protects the source if a lease expires during an in-flight request.
 
-Optimized objects receive `image-optimizer-version`, `image-optimizer-quality`, `image-optimizer-date`, `image-optimizer-job-id`, `image-optimizer-item-id`, and `original-size` custom R2 metadata. They are excluded from future jobs. Keep the backups for a retention period that suits you; an [R2 object lifecycle rule](https://developers.cloudflare.com/r2/buckets/object-lifecycles/) can expire the `__optimizer/originals/` prefix. The application does not automatically restore objects or delete backups.
+Optimized objects receive `image-optimizer-version`, `image-optimizer-quality`, `image-optimizer-date`, `image-optimizer-job-id`, `image-optimizer-item-id`, and `original-size` custom R2 metadata. They are excluded from future jobs. The manifest prefix is separate from `__optimizer/originals/`, so a lifecycle rule targeting only originals will not erase the key mapping. **Do not enable a backup expiration rule until you have exported a SQLite snapshot, verified the manifests, and completed a restore drill in your bucket.** An [R2 object lifecycle rule](https://developers.cloudflare.com/r2/buckets/object-lifecycles/) can later expire only the `__optimizer/originals/` prefix at a retention period you choose. The application does not automatically restore objects or delete backups.
+
+### Backup recovery drill
+
+Use the [SQLite backup API](https://www.sqlite.org/backup.html) through the snapshot command rather than copying a live WAL database file. Choose a new output path for every snapshot and copy verified snapshots to storage outside the app host:
+
+```sh
+node --env-file=.env scripts/snapshot-db.mjs --output .data/snapshots/optimizer-YYYY-MM-DD.sqlite
+```
+
+The command refuses to overwrite a snapshot, verifies SQLite integrity, and reports the saved bucket identity and row counts. It also works on an older unbound database and reports `bucket: null`; confirm and bind that database before writing manifests. For backups created before manifests were added, backfill them in the configured bucket. The dry run downloads each recorded backup and checks its size and SHA-256 hash without writing to R2:
+
+```sh
+node --env-file=.env scripts/backfill-manifests.mjs
+node --env-file=.env scripts/backfill-manifests.mjs --apply
+```
+
+For an older unbound database, use `--verify-unbound` for the read-only hash check, then use the [legacy binding command](#local-development) with the verified bucket and run `--apply`. The backfill refuses a bucket identity mismatch, writes manifests without overwriting existing ones, and reads each manifest back. It does not change SQLite job records.
+
+The restore drill needs only the bucket credentials and the manifest stored in R2; it does not read SQLite. By default it selects the first manifest under `__optimizer/manifests/`. Pass `--manifest-key KEY` to select another. The dry run verifies the backup hash. With `--apply`, it restores to a unique key under `__optimizer/restore-drills/`, then verifies the restored hash and headers and checks that the original source key was untouched:
+
+```sh
+node --env-file=.env scripts/restore-drill.mjs
+node --env-file=.env scripts/restore-drill.mjs --apply
+```
+
+The drill leaves its restored object in the bucket for inspection. Remove that drill object when you no longer need it. Keep the manifest and an off-host SQLite snapshot beyond any original-backup retention period.
 
 ## Local development
 
@@ -86,6 +112,6 @@ npm run test:coverage
 npm run check
 ```
 
-The suite covers the dashboard actions, HTTP authentication and validation, scan persistence and recovery, candidate filtering, image and metadata validation, backup verification, replacement reconciliation, durable retry deadlines and exhaustion, credential pause and resume, failure classification, bucket binding, worker lease takeover, and database migration. Tests use temporary SQLite databases, local JPEG fixtures, and mocked R2 operations. They do not need R2 credentials or write to a real bucket. `npm run check` runs coverage, typechecking, a production build, and a built-server smoke check; GitHub Actions runs it on Node 22 and 24. The coverage gate catches large regressions, but a passing percentage alone does not prove every failure mode is covered.
+The suite covers the dashboard actions, HTTP authentication and validation, scan persistence and recovery, candidate filtering, image and metadata validation, backup and manifest verification, replacement reconciliation, durable retry deadlines and exhaustion, credential pause and resume, failure classification, bucket binding, worker lease takeover, SQLite snapshots, and database migration. Tests use temporary SQLite databases, local JPEG fixtures, and mocked R2 operations. They do not need R2 credentials or write to a real bucket. `npm run check` runs coverage, typechecking, a production build, and a built-server smoke check; GitHub Actions runs it on Node 22 and 24. The coverage gate catches large regressions, but a passing percentage alone does not prove every failure mode is covered.
 
-A live backup and conditional replacement still need a small, explicitly started test job in your own R2 bucket. The automated tests do not exercise Cloudflare's S3 implementation, deployment configuration, or a browser against a running production server.
+A live backup and conditional replacement still need a small, explicitly started test job in your own R2 bucket. The automated tests do not exercise Cloudflare's S3 implementation, deployment configuration, or a browser against a running production server. The recovery commands above provide a separate live manifest and restore check before you configure retention.

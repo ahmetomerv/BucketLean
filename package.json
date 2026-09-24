@@ -10,6 +10,9 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage --silent",
     "test:smoke": "node scripts/smoke.mjs",
+    "db:snapshot": "node scripts/snapshot-db.mjs",
+    "manifest:backfill": "node scripts/backfill-manifests.mjs",
+    "restore:drill": "node scripts/restore-drill.mjs",
     "check": "npm run test:coverage && npm run typecheck && npm run build && npm run test:smoke"
   },
   "dependencies": {
