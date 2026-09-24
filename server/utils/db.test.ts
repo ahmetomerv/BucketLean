@@ -69,3 +69,34 @@ test('binds an empty database to the configured bucket on first use', () => {
   expect(db.prepare('SELECT bucket FROM database_identity WHERE id = 1').get()).toEqual({ bucket: 'original-bucket' })
   db.close()
 })
+
+test('moves legacy ambiguous failures to attention exactly once', () => {
+  closeDatabase()
+  const uncertainPath = join(dir, 'uncertain.sqlite')
+  process.env.DATABASE_PATH = uncertainPath
+  getDatabase()
+  closeDatabase()
+  const old = new Database(uncertainPath)
+  old.exec(`
+    INSERT INTO optimization_jobs (id, status, preset, created_at) VALUES (1, 'completed', 'balanced', '2026-09-23');
+    INSERT INTO optimization_items (job_id, key, original_size, status, backup_key, original_sha256, optimized_sha256, created_at)
+      VALUES (1, 'photo.jpg', 100, 'failed', '__optimizer/originals/1/photo.jpg', 'original', 'optimized', '2026-09-23');
+    DELETE FROM app_migrations WHERE name = 'uncertain_replacements_v1';
+  `)
+  old.close()
+  getDatabase()
+  const migrated = new Database(uncertainPath, { readonly: true })
+  expect(migrated.prepare('SELECT status FROM optimization_items WHERE id = 1').get()).toEqual({ status: 'needs_attention' })
+  expect(migrated.prepare('SELECT status FROM optimization_jobs WHERE id = 1').get()).toEqual({ status: 'needs_attention' })
+  expect((migrated.pragma('table_info(optimization_items)') as { name: string }[]).map(row => row.name))
+    .toEqual(expect.arrayContaining(['backup_verified_at', 'replacement_attempted_at']))
+  migrated.close()
+  closeDatabase()
+  const changed = new Database(uncertainPath)
+  changed.exec("UPDATE optimization_items SET status = 'failed' WHERE id = 1")
+  changed.close()
+  getDatabase()
+  const reopened = new Database(uncertainPath, { readonly: true })
+  expect(reopened.prepare('SELECT status FROM optimization_items WHERE id = 1').get()).toEqual({ status: 'failed' })
+  reopened.close()
+})

@@ -13,13 +13,22 @@ type DashboardData = {
   scan?: { id: number, status: string, prefix: string, discoveredCount: number, metadataErrorCount: number, startedAt: string | null } | null
   eligible?: number
   activeJob?: boolean
+  attentionJob?: boolean
 }
 
-function setupData({ scan = null, eligible = 0, activeJob = false }: DashboardData = {}) {
+function setupData({ scan = null, eligible = 0, activeJob = false, attentionJob = false }: DashboardData = {}) {
   const overview = ref({ scan, totals: { objects: 0, jpegs: eligible, jpegBytes: 0, optimized: 0, eligible, metadataUnknown: 0 } })
   const objects = ref({ items: [], total: 0, page: 1, pageSize: 100 })
-  const jobs = ref({ jobs: activeJob ? [{ job: { id: 1, status: 'running' }, total: 1, completed: 0, skipped: 0,
-    failed: 0, originalBytes: 100, finalBytes: 100, savedBytes: 0, savedPercent: 0, current: null }] : [] })
+  const attentionSummary = { job: { id: 1, status: 'needs_attention' },
+    total: 1, completed: 0, skipped: 0, failed: 0, needsAttention: 1,
+    originalBytes: 100, finalBytes: null, savedBytes: null, savedPercent: null, current: null }
+  const jobs = ref({ jobs: attentionJob ? [
+    { ...attentionSummary, job: { id: 2, status: 'completed' }, needsAttention: 0,
+      finalBytes: 70, savedBytes: 30, savedPercent: 30 }, attentionSummary,
+  ] : activeJob ? [{ job: { id: 1, status: 'running' },
+    total: 1, completed: 0, skipped: 0, failed: 0, needsAttention: attentionJob ? 1 : 0,
+    originalBytes: 100, finalBytes: 100, savedBytes: 0,
+    savedPercent: 0, current: null }] : [] })
   vi.stubGlobal('useFetch', (url: string) => {
     if (url === '/api/overview') return { data: overview, refresh: refreshOverview }
     if (url === '/api/objects') return { data: objects, refresh: refreshObjects }
@@ -103,4 +112,18 @@ test('active work disables conflicting actions and API errors remain visible', a
   await flushPromises()
   expect(failed.wrapper.text()).toContain('R2 unavailable')
   failed.wrapper.unmount()
+})
+
+test('an uncertain job shows unknown totals and offers an explicit remote recheck', async () => {
+  setupData({ scan: { id: 1, status: 'completed', prefix: '', discoveredCount: 1,
+    metadataErrorCount: 0, startedAt: null }, eligible: 1, attentionJob: true })
+  const { wrapper, button } = await renderPage()
+  expect(wrapper.text()).toContain('Pending verification')
+  expect(wrapper.text()).toContain('1 need attention')
+  expect(button('Start scan').attributes('disabled')).toBeDefined()
+  await button('Recheck remote state').trigger('click')
+  await flushPromises()
+  expect(post).toHaveBeenCalledWith('/api/jobs/1/reconcile', { method: 'POST' })
+  expect(refreshJobs).toHaveBeenCalledOnce()
+  wrapper.unmount()
 })

@@ -98,6 +98,22 @@ export function getDatabase() {
       addColumn('optimization_items', 'backup_key', 'TEXT')
       addColumn('optimization_items', 'original_sha256', 'TEXT')
       addColumn('optimization_items', 'optimized_sha256', 'TEXT')
+      addColumn('optimization_items', 'backup_verified_at', 'TEXT')
+      addColumn('optimization_items', 'replacement_attempted_at', 'TEXT')
+      connection.exec('CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)')
+      if (!connection.prepare('SELECT 1 FROM app_migrations WHERE name = ?').get('uncertain_replacements_v1')) {
+        connection.transaction(() => {
+          // Older workers could mark a successful but unverified replacement as failed.
+          connection!.exec(`UPDATE optimization_items SET status = 'needs_attention'
+            WHERE status = 'failed' AND backup_key IS NOT NULL AND original_sha256 IS NOT NULL AND optimized_sha256 IS NOT NULL`)
+          connection!.exec(`UPDATE optimization_jobs SET status = 'needs_attention'
+            WHERE status = 'completed' AND EXISTS (
+              SELECT 1 FROM optimization_items WHERE job_id = optimization_jobs.id AND status = 'needs_attention'
+            )`)
+          connection!.prepare('INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)')
+            .run('uncertain_replacements_v1', new Date().toISOString())
+        }).immediate()
+      }
       assertBucketIdentity(connection)
       orm = drizzle({ client: connection, schema })
     } catch (error) {

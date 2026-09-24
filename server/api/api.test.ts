@@ -13,6 +13,8 @@ const originalPassword = process.env.APP_PASSWORD
 const originalDatabasePath = process.env.DATABASE_PATH
 const originalEndpoint = process.env.R2_ENDPOINT
 const originalBucket = process.env.R2_BUCKET
+const originalAccessKey = process.env.R2_ACCESS_KEY_ID
+const originalSecretKey = process.env.R2_SECRET_ACCESS_KEY
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'r2-api-test-'))
@@ -23,9 +25,10 @@ beforeAll(async () => {
   // Nitro provides these H3 imports to route files at build time.
   for (const [name, value] of Object.entries({ createError, defineEventHandler, getHeader, getQuery,
     getRouterParam, readBody, setHeader, setResponseStatus })) vi.stubGlobal(name, value)
-  const [auth, health, overview, listObjects, listJobs, jobDetail, createJob, createScan] = await Promise.all([
+  const [auth, health, overview, listObjects, listJobs, jobDetail, createJob, createScan, reconcileJob] = await Promise.all([
     import('../middleware/auth'), import('./health.get'), import('./overview.get'), import('./objects.get'),
     import('./jobs.get'), import('./jobs/[id].get'), import('./jobs.post'), import('./scan.post'),
+    import('./jobs/[id]/reconcile.post'),
   ])
   const router = createRouter()
   router.get('/api/health', health.default)
@@ -34,6 +37,7 @@ beforeAll(async () => {
   router.get('/api/jobs', listJobs.default)
   router.get('/api/jobs/:id', jobDetail.default)
   router.post('/api/jobs', createJob.default)
+  router.post('/api/jobs/:id/reconcile', reconcileJob.default)
   router.post('/api/scan', createScan.default)
   const app = createApp()
   app.use(auth.default)
@@ -52,6 +56,10 @@ afterAll(() => {
   else process.env.R2_ENDPOINT = originalEndpoint
   if (originalBucket === undefined) delete process.env.R2_BUCKET
   else process.env.R2_BUCKET = originalBucket
+  if (originalAccessKey === undefined) delete process.env.R2_ACCESS_KEY_ID
+  else process.env.R2_ACCESS_KEY_ID = originalAccessKey
+  if (originalSecretKey === undefined) delete process.env.R2_SECRET_ACCESS_KEY
+  else process.env.R2_SECRET_ACCESS_KEY = originalSecretKey
   vi.unstubAllGlobals()
 })
 
@@ -120,4 +128,22 @@ test('lists persisted job summaries and paginates their item detail', async () =
   expect(await detail.json()).toMatchObject({ total: 1, items: [{ key: 'one.jpg' }], page: 1 })
   expect((await call(`/api/jobs/${job.id}?page=0`)).status).toBe(400)
   expect(await (await call(`/api/jobs/${job.id}?page=2`)).json()).toMatchObject({ items: [], page: 2 })
+})
+
+test('reconciliation routes validate state and unresolved jobs block new work', async () => {
+  process.env.R2_ACCESS_KEY_ID = 'test'
+  process.env.R2_SECRET_ACCESS_KEY = 'test'
+  expect((await call('/api/jobs/nope/reconcile', { method: 'POST' })).status).toBe(400)
+  expect((await call('/api/jobs/999999/reconcile', { method: 'POST' })).status).toBe(404)
+  const db = getDatabase()
+  const job = db.insert(optimizationJobs).values({ status: 'needs_attention', preset: 'balanced',
+    createdAt: new Date().toISOString() }).returning().get()
+  expect((await call('/api/scan', { method: 'POST', body: { prefix: '' } })).status).toBe(409)
+  expect((await call('/api/jobs', { method: 'POST', body: {} })).status).toBe(409)
+  expect((await call(`/api/jobs/${job.id}/reconcile`, { method: 'POST' })).status).toBe(409)
+  for (let index = 0; index < 11; index++) db.insert(optimizationJobs).values({ status: 'completed', preset: 'balanced',
+    createdAt: new Date().toISOString() }).run()
+  const listed = await (await call('/api/jobs')).json() as { jobs: { job: { id: number, status: string } }[] }
+  expect(listed.jobs).toHaveLength(11)
+  expect(listed.jobs[0]?.job).toMatchObject({ id: job.id, status: 'needs_attention' })
 })

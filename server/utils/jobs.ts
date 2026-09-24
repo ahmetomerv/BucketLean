@@ -22,6 +22,11 @@ function etag(value: string | null | undefined) { return value?.replace(/^"|"$/g
 function isPreconditionFailure(error: unknown) {
   return !!error && typeof error === 'object' && ('$metadata' in error) && (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 412
 }
+function isNotFound(error: unknown) {
+  return !!error && typeof error === 'object' &&
+    (('$metadata' in error && (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404) ||
+      ('name' in error && (error as { name?: string }).name === 'NoSuchKey'))
+}
 
 export function enqueueJob(input: { prefix: string, minBytes: number, preset: Preset, minimumSavingPercent: number, preserveMetadata: boolean, backupOriginals: boolean }) {
   r2Config()
@@ -29,8 +34,9 @@ export function enqueueJob(input: { prefix: string, minBytes: number, preset: Pr
   const db = getDatabase()
   const activeScan = db.select({ id: scans.id }).from(scans).where(inArray(scans.status, ['queued', 'running'])).get()
   if (activeScan) throw new Error('Wait for the current scan to finish')
-  const activeJob = db.select({ id: optimizationJobs.id }).from(optimizationJobs).where(inArray(optimizationJobs.status, ['queued', 'running'])).get()
-  if (activeJob) throw new Error('An optimization job is already active')
+  const activeJob = db.select({ id: optimizationJobs.id }).from(optimizationJobs)
+    .where(inArray(optimizationJobs.status, ['queued', 'running', 'needs_attention'])).get()
+  if (activeJob) throw new Error('Resolve the existing optimization job before creating another')
   const scan = db.select().from(scans).where(eq(scans.status, 'completed')).orderBy(desc(scans.id)).get()
   if (!scan) throw new Error('Complete a scan before creating a job')
   const candidates = db.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects).where(and(
@@ -56,6 +62,31 @@ export function enqueueJob(input: { prefix: string, minBytes: number, preset: Pr
   return { job, count: candidates.length }
 }
 
+export function enqueueReconciliation(jobId: number) {
+  r2Config()
+  const db = getDatabase()
+  const job = db.transaction((tx) => {
+    const current = tx.select().from(optimizationJobs).where(eq(optimizationJobs.id, jobId)).get()
+    if (!current) throw new Error('Job not found')
+    if (current.status !== 'needs_attention') throw new Error('Job does not need reconciliation')
+    if (tx.select({ id: scans.id }).from(scans).where(inArray(scans.status, ['queued', 'running'])).get()) {
+      throw new Error('Wait for the current scan to finish')
+    }
+    if (tx.select({ id: optimizationJobs.id }).from(optimizationJobs)
+      .where(inArray(optimizationJobs.status, ['queued', 'running'])).get()) {
+      throw new Error('An optimization job is already active')
+    }
+    const items = tx.update(optimizationItems).set({ status: 'uploading', error: null, finishedAt: null })
+      .where(and(eq(optimizationItems.jobId, jobId), eq(optimizationItems.status, 'needs_attention'))).returning({ id: optimizationItems.id }).all()
+    if (!items.length) throw new Error('Job has no items needing reconciliation')
+    tx.update(optimizationJobs).set({ status: 'queued', finishedAt: null }).where(eq(optimizationJobs.id, jobId)).run()
+    return current
+  })
+  log('info', 'job_reconciliation_queued', { jobId, previousStatus: job.status })
+  void runNextJob()
+  return { jobId }
+}
+
 export function getJobSummary(jobId: number) {
   const db = getDatabase()
   const job = db.select().from(optimizationJobs).where(eq(optimizationJobs.id, jobId)).get()
@@ -65,13 +96,20 @@ export function getJobSummary(jobId: number) {
     completed: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'completed' then 1 else 0 end), 0)`,
     skipped: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'skipped' then 1 else 0 end), 0)`,
     failed: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'failed' then 1 else 0 end), 0)`,
+    needsAttention: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'needs_attention' then 1 else 0 end), 0)`,
+    unknownFinalCount: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'needs_attention' or
+      (${optimizationItems.replacementAttemptedAt} is not null and ${optimizationItems.status} not in ('completed', 'skipped', 'failed'))
+      then 1 else 0 end), 0)`,
     originalBytes: sql<number>`coalesce(sum(${optimizationItems.originalSize}), 0)`,
-    finalBytes: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'completed' then ${optimizationItems.optimizedSize} else ${optimizationItems.originalSize} end), 0)`,
+    calculatedFinalBytes: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'completed' then ${optimizationItems.optimizedSize} else ${optimizationItems.originalSize} end), 0)`,
   }).from(optimizationItems).where(eq(optimizationItems.jobId, jobId)).get()!
   const current = db.select({ key: optimizationItems.key, status: optimizationItems.status }).from(optimizationItems)
     .where(and(eq(optimizationItems.jobId, jobId), inArray(optimizationItems.status, ['downloading', 'processing', 'uploading']))).orderBy(asc(optimizationItems.id)).get()
-  return { job, ...counts, current, savedBytes: counts.originalBytes - counts.finalBytes,
-    savedPercent: counts.originalBytes ? Math.round(100 * (counts.originalBytes - counts.finalBytes) / counts.originalBytes) : 0 }
+  const { unknownFinalCount, calculatedFinalBytes, ...publicCounts } = counts
+  const finalBytes = unknownFinalCount ? null : calculatedFinalBytes
+  const savedBytes = finalBytes === null ? null : counts.originalBytes - finalBytes
+  return { job, ...publicCounts, current, finalBytes, savedBytes,
+    savedPercent: savedBytes === null ? null : counts.originalBytes ? Math.round(100 * savedBytes / counts.originalBytes) : 0 }
 }
 
 async function readObject(client: Client, bucket: string, key: string, ifMatch?: string) {
@@ -122,13 +160,42 @@ function markCompleted(job: Job, item: Item, optimizedSize: number, optimizedEta
   log('info', 'item_completed', { jobId: job.id, itemId: item.id, key: item.key, originalSize: item.originalSize, optimizedSize })
 }
 
-async function reconcileOwnUpload(client: Client, bucket: string, job: Job, item: Item, head: HeadObjectCommandOutput) {
-  if (head.Metadata?.['image-optimizer-job-id'] !== String(job.id) || head.Metadata?.['image-optimizer-item-id'] !== String(item.id) || !item.optimizedSha256) return false
+async function reconcileRemoteState(client: Client, bucket: string, job: Job, item: Item, head: HeadObjectCommandOutput) {
+  if (!item.backupKey || !item.originalSha256 || !item.optimizedSha256) {
+    throw new Error('Persisted upload intent is incomplete; inspect source and backup manually')
+  }
   workerLease.assertOwned()
-  const current = await readObject(client, bucket, item.key, head.ETag)
-  if (digest(current.bytes) !== item.optimizedSha256) throw new Error('Uploaded object hash differs from the validated output; inspect backup before retrying')
-  markCompleted(job, item, current.bytes.length, head.ETag ?? null)
-  return true
+  const source = await readObject(client, bucket, item.key, head.ETag)
+  workerLease.assertOwned()
+  const sourceHash = digest(source.bytes)
+  let backupMissing = false
+  let backup: Awaited<ReturnType<typeof readObject>> | undefined
+  try { backup = await readObject(client, bucket, item.backupKey) }
+  catch (error) {
+    if (isNotFound(error)) backupMissing = true
+    else throw error
+  }
+  workerLease.assertOwned()
+  if (backup && digest(backup.bytes) !== item.originalSha256) throw new Error('Backup hash differs from the recorded original')
+  if (backup && !item.backupVerifiedAt) {
+    getDatabase().update(optimizationItems).set({ backupVerifiedAt: new Date().toISOString() })
+      .where(eq(optimizationItems.id, item.id)).run()
+  }
+  const ownUpload = head.Metadata?.['image-optimizer-version'] === '1' &&
+    head.Metadata?.['image-optimizer-job-id'] === String(job.id) &&
+    head.Metadata?.['image-optimizer-item-id'] === String(item.id)
+  if (sourceHash === item.optimizedSha256 && ownUpload) {
+    if (backupMissing) throw new Error('Optimized source is present, but its original backup is missing')
+    markCompleted(job, item, source.bytes.length, head.ETag ?? null)
+    return 'completed' as const
+  }
+  if (sourceHash === item.originalSha256 && etag(head.ETag) === etag(item.etag) &&
+    source.bytes.length === item.originalSize && !head.Metadata?.['image-optimizer-version']) {
+    if (backupMissing && item.backupVerifiedAt) getDatabase().update(optimizationItems)
+      .set({ backupVerifiedAt: null }).where(eq(optimizationItems.id, item.id)).run()
+    return 'original' as const
+  }
+  throw new Error('Source differs from the recorded original and verified replacement; inspect both objects')
 }
 
 async function processItem(client: Client, bucket: string, job: Job, item: Item) {
@@ -136,7 +203,9 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
   workerLease.assertOwned()
   const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.key }))
   workerLease.assertOwned()
-  if (await reconcileOwnUpload(client, bucket, job, item, head)) return
+  if (item.status === 'uploading' || item.backupKey || item.replacementAttemptedAt) {
+    if (await reconcileRemoteState(client, bucket, job, item, head) === 'completed') return
+  }
   if (head.Metadata?.['image-optimizer-version']) {
     db.update(optimizationItems).set({ status: 'skipped', error: 'Already optimized by another job', finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
     return
@@ -164,11 +233,14 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
     return
   }
   const backupKey = `__optimizer/originals/${job.id}/${createHash('sha256').update(item.key).digest('hex')}.jpg`
+  const originalSha256 = digest(downloaded.bytes)
   const optimizedSha256 = digest(output)
-  db.update(optimizationItems).set({ status: 'uploading', backupKey, originalSha256: digest(downloaded.bytes), optimizedSha256,
-    optimizedSize: output.length, savedPercent }).where(eq(optimizationItems.id, item.id)).run()
+  db.update(optimizationItems).set({ status: 'uploading', backupKey, originalSha256, optimizedSha256,
+    optimizedSize: output.length, savedPercent, backupVerifiedAt: null }).where(eq(optimizationItems.id, item.id)).run()
   await ensureBackup(client, bucket, backupKey, downloaded.bytes, head)
   workerLease.assertOwned()
+  const backupVerifiedAt = new Date().toISOString()
+  db.update(optimizationItems).set({ backupVerifiedAt }).where(eq(optimizationItems.id, item.id)).run()
   const metadata = {
     ...head.Metadata,
     'image-optimizer-version': '1',
@@ -178,23 +250,22 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
     'image-optimizer-item-id': String(item.id),
     'original-size': String(downloaded.bytes.length),
   }
-  try {
-    await client.send(new PutObjectCommand({ Bucket: bucket, Key: item.key, Body: output, ContentLength: output.length,
-      IfMatch: item.etag, Metadata: metadata, ...contentHeaders(head) }))
-  } catch (error) {
-    // A timed-out PUT can still have succeeded. Reconcile before recording failure.
-    workerLease.assertOwned()
-    const current = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.key }))
-    if (await reconcileOwnUpload(client, bucket, job, { ...item, optimizedSha256 }, current)) return
-    if (isPreconditionFailure(error)) throw new Error('Object changed before replacement; verified backup was retained')
-    throw error
-  }
+  const replacementAttemptedAt = item.replacementAttemptedAt ?? new Date().toISOString()
+  db.update(optimizationItems).set({ replacementAttemptedAt }).where(eq(optimizationItems.id, item.id)).run()
+  workerLease.assertOwned()
+  let putError: unknown
+  try { await client.send(new PutObjectCommand({ Bucket: bucket, Key: item.key, Body: output, ContentLength: output.length,
+    IfMatch: item.etag, Metadata: metadata, ...contentHeaders(head) })) }
+  catch (error) { putError = error }
   workerLease.assertOwned()
   const verified = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.key }))
-  if (verified.Metadata?.['image-optimizer-job-id'] !== String(job.id) || verified.Metadata?.['image-optimizer-item-id'] !== String(item.id)) throw new Error('Replacement metadata verification failed; inspect backup')
-  const current = await readObject(client, bucket, item.key, verified.ETag)
-  if (current.bytes.length !== output.length || digest(current.bytes) !== optimizedSha256) throw new Error('Replacement verification failed; inspect backup')
-  markCompleted(job, item, output.length, verified.ETag ?? null)
+  const intent = { ...item, backupKey, originalSha256, optimizedSha256, optimizedSize: output.length,
+    backupVerifiedAt, replacementAttemptedAt }
+  const outcome = await reconcileRemoteState(client, bucket, job, intent, verified)
+  if (outcome === 'completed') return
+  const cause = putError ? isPreconditionFailure(putError) ? 'Conditional replacement was rejected' : errorMessage(putError)
+    : 'Replacement returned success'
+  throw new Error(`${cause}; the original is still present. Recheck the job to retry safely`)
 }
 
 let stopping = false
@@ -232,14 +303,22 @@ async function runJob(job: Job) {
         if (error instanceof WorkerLeaseLostError) throw error
         workerLease.assertOwned()
         const message = errorMessage(error)
-        db.update(optimizationItems).set({ status: 'failed', error: message, finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
-        log('error', 'item_failed', { jobId: job.id, itemId: item.id, key: item.key, error: message })
+        const latest = db.select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()!
+        const uncertain = latest.status === 'uploading' || !!latest.backupKey || !!latest.replacementAttemptedAt
+        const status = uncertain ? 'needs_attention' : 'failed'
+        db.update(optimizationItems).set({ status, error: message, finishedAt: new Date().toISOString() })
+          .where(eq(optimizationItems.id, item.id)).run()
+        log('error', uncertain ? 'item_needs_attention' : 'item_failed',
+          { jobId: job.id, itemId: item.id, key: item.key, error: message })
       }
     }
     if (!stopping) {
       workerLease.assertOwned()
-      db.update(optimizationJobs).set({ status: 'completed', finishedAt: new Date().toISOString() }).where(eq(optimizationJobs.id, job.id)).run()
-      log('info', 'job_completed', { jobId: job.id })
+      const needsAttention = db.select({ id: optimizationItems.id }).from(optimizationItems)
+        .where(and(eq(optimizationItems.jobId, job.id), eq(optimizationItems.status, 'needs_attention'))).get()
+      const status = needsAttention ? 'needs_attention' : 'completed'
+      db.update(optimizationJobs).set({ status, finishedAt: new Date().toISOString() }).where(eq(optimizationJobs.id, job.id)).run()
+      log('info', status === 'completed' ? 'job_completed' : 'job_needs_attention', { jobId: job.id })
     }
   } finally { client.destroy() }
 }

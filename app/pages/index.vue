@@ -19,8 +19,8 @@ const { data: jobsResult, refresh: refreshJobs } = await useFetch('/api/jobs', {
 
 watch([prefix, minMiB, status], () => { page.value = 1 })
 const scanning = computed(() => ['queued', 'running'].includes(overview.value.scan?.status ?? ''))
-const currentJob = computed(() => jobsResult.value.jobs[0] ?? null)
-const jobActive = computed(() => ['queued', 'running'].includes(currentJob.value?.job.status ?? ''))
+const currentJob = computed(() => jobsResult.value.jobs.find(job => job?.job.status === 'needs_attention') ?? jobsResult.value.jobs[0] ?? null)
+const jobActive = computed(() => ['queued', 'running', 'needs_attention'].includes(currentJob.value?.job.status ?? ''))
 const maxPage = computed(() => Math.max(1, Math.ceil(result.value.total / result.value.pageSize)))
 const number = new Intl.NumberFormat()
 function formatBytes(bytes: number) {
@@ -58,6 +58,20 @@ async function startJob() {
     actionError.value = error && typeof error === 'object' && 'data' in error
       ? String((error as { data?: { statusMessage?: string } }).data?.statusMessage ?? 'Job could not start')
       : 'Job could not start'
+  } finally { busy.value = false }
+}
+
+async function recheckJob() {
+  if (!currentJob.value) return
+  busy.value = true
+  actionError.value = ''
+  try {
+    await $fetch(`/api/jobs/${currentJob.value.job.id}/reconcile`, { method: 'POST' })
+    await refreshJobs()
+  } catch (error: unknown) {
+    actionError.value = error && typeof error === 'object' && 'data' in error
+      ? String((error as { data?: { statusMessage?: string } }).data?.statusMessage ?? 'Recheck could not start')
+      : 'Recheck could not start'
   } finally { busy.value = false }
 }
 
@@ -111,11 +125,15 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
       <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">
-        <h3 class="font-semibold">Latest job #{{ currentJob.job.id }} · <span class="capitalize">{{ currentJob.job.status }}</span></h3>
-        <p class="mt-1 text-sm text-slate-600">{{ number.format(currentJob.completed + currentJob.skipped + currentJob.failed) }} / {{ number.format(currentJob.total) }} processed · {{ number.format(currentJob.completed) }} optimized · {{ number.format(currentJob.skipped) }} skipped · {{ number.format(currentJob.failed) }} failed</p>
+        <h3 class="font-semibold">Job #{{ currentJob.job.id }} · <span class="capitalize">{{ currentJob.job.status.replaceAll('_', ' ') }}</span></h3>
+        <p class="mt-1 text-sm text-slate-600">{{ number.format(currentJob.completed + currentJob.skipped + currentJob.failed + currentJob.needsAttention) }} / {{ number.format(currentJob.total) }} processed · {{ number.format(currentJob.completed) }} optimized · {{ number.format(currentJob.skipped) }} skipped · {{ number.format(currentJob.failed) }} failed · {{ number.format(currentJob.needsAttention) }} need attention</p>
         <p v-if="currentJob.current" class="mt-1 break-all text-xs text-slate-600">Now {{ currentJob.current.status }}: {{ currentJob.current.key }}</p>
-        <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div class="h-full bg-emerald-600" :style="{ width: `${currentJob.total ? 100 * (currentJob.completed + currentJob.skipped + currentJob.failed) / currentJob.total : 0}%` }"></div></div>
-        <p class="mt-3 text-sm text-slate-700">Original {{ formatBytes(currentJob.originalBytes) }} · Final {{ formatBytes(currentJob.finalBytes) }} · Saved {{ formatBytes(currentJob.savedBytes) }} ({{ currentJob.savedPercent }}%)</p>
+        <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div class="h-full bg-emerald-600" :style="{ width: `${currentJob.total ? 100 * (currentJob.completed + currentJob.skipped + currentJob.failed + currentJob.needsAttention) / currentJob.total : 0}%` }"></div></div>
+        <p class="mt-3 text-sm text-slate-700">Original {{ formatBytes(currentJob.originalBytes) }} · Final {{ currentJob.finalBytes == null ? 'Pending verification' : formatBytes(currentJob.finalBytes) }} · Saved {{ currentJob.savedBytes == null ? 'Pending verification' : `${formatBytes(currentJob.savedBytes)} (${currentJob.savedPercent}%)` }}</p>
+        <div v-if="currentJob.job.status === 'needs_attention'" class="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <p>R2 did not confirm the source or backup state of {{ number.format(currentJob.needsAttention) }} item(s). Review the item errors in <code>/api/jobs/{{ currentJob.job.id }}</code>, then recheck the source and backup before retrying.</p>
+          <button :disabled="busy" class="mt-2 rounded bg-amber-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50" @click="recheckJob">{{ busy ? 'Rechecking…' : 'Recheck remote state' }}</button>
+        </div>
         <p class="mt-1 text-xs text-slate-500">Backups: <code>__optimizer/originals/{{ currentJob.job.id }}/</code></p>
       </div>
     </section>

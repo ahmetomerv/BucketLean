@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,21 +17,28 @@ vi.mock('./r2', async (importOriginal) => {
 vi.mock('./image', () => ({ qualities: { archival: 90, balanced: 82, aggressive: 72 }, optimizeImage: compress }))
 
 import { closeDatabase, getDatabase, getDatabaseConnection } from './db'
-import { enqueueJob, getJobSummary, runNextJob } from './jobs'
+import { enqueueJob, enqueueReconciliation, getJobSummary, runNextJob } from './jobs'
 import { objects, optimizationItems, optimizationJobs, scans } from './schema'
 import { workerLease } from './worker-lease'
 
 let dir: string
+let databaseNumber = 0
 const previous = { DATABASE_PATH: process.env.DATABASE_PATH, R2_ENDPOINT: process.env.R2_ENDPOINT, R2_BUCKET: process.env.R2_BUCKET }
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'r2-jobs-test-'))
-  process.env.DATABASE_PATH = join(dir, 'test.sqlite')
   process.env.R2_ENDPOINT = 'https://example.r2.cloudflarestorage.com'
   process.env.R2_BUCKET = 'test'
 })
-afterAll(() => {
+beforeEach(() => {
+  process.env.DATABASE_PATH = join(dir, `${++databaseNumber}.sqlite`)
+  send.mockReset()
+  compress.mockReset()
+})
+afterEach(() => {
   workerLease.release()
   closeDatabase()
+})
+afterAll(() => {
   rmSync(dir, { recursive: true, force: true })
   for (const [name, value] of Object.entries(previous)) {
     if (value === undefined) delete process.env[name]
@@ -78,7 +85,8 @@ test('continues after backup failure, replaces only after verified backup, and s
   const { job, count } = enqueueJob({ prefix: 'photos/', minBytes: 0, preset: 'balanced', minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
   expect(count).toBe(3)
   await runNextJob()
-  expect(getJobSummary(job.id)).toMatchObject({ completed: 1, skipped: 1, failed: 1, originalBytes: 300, finalBytes: 270, savedBytes: 30 })
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'needs_attention' }, completed: 1, skipped: 1,
+    failed: 0, needsAttention: 1, originalBytes: 300, finalBytes: null, savedBytes: null })
   expect(store.get('photos/a.jpg')?.bytes.length).toBe(100)
   expect(store.get('photos/b.jpg')?.bytes.length).toBe(70)
   expect(store.get('photos/c.jpg')?.bytes.length).toBe(100)
@@ -90,6 +98,9 @@ test('continues after backup failure, replaces only after verified backup, and s
   expect(writes[replaceIndex]?.ifMatch).toBe('"b"')
   expect(store.get('photos/b.jpg')?.metadata['image-optimizer-version']).toBe('1')
   expect(db.select().from(objects).where(eq(objects.key, 'photos/b.jpg')).get()?.isOptimized).toBe(true)
+  expect(db.select().from(optimizationItems).where(eq(optimizationItems.key, 'photos/b.jpg')).get()).toMatchObject({
+    status: 'completed', backupVerifiedAt: expect.any(String), replacementAttemptedAt: expect.any(String),
+  })
 })
 
 test('reconciles an upload completed before the worker could save its result', async () => {
@@ -97,20 +108,29 @@ test('reconciles an upload completed before the worker could save its result', a
   const job = db.insert(optimizationJobs).values({ status: 'running', preset: 'balanced',
     minimumSavingPercent: 15, backupOriginals: true, preserveMetadata: true, createdAt: new Date().toISOString() }).returning().get()
   const optimized = Buffer.alloc(70, 9)
+  const original = Buffer.alloc(100, 9)
+  const backupKey = '__optimizer/originals/recovered.jpg'
   const item = db.insert(optimizationItems).values({ jobId: job.id, key: 'photos/recovered.jpg', etag: '"old"',
-    originalSize: 100, optimizedSize: 70, optimizedSha256: createHash('sha256').update(optimized).digest('hex'),
+    originalSize: 100, optimizedSize: 70, backupKey,
+    originalSha256: createHash('sha256').update(original).digest('hex'),
+    optimizedSha256: createHash('sha256').update(optimized).digest('hex'),
+    replacementAttemptedAt: new Date().toISOString(),
     status: 'uploading', createdAt: new Date().toISOString() }).returning().get()
+  closeDatabase() // Simulate the process restarting with only the persisted intent available.
   send.mockClear()
   send.mockImplementation(async (command: unknown) => {
     if (command instanceof HeadObjectCommand) return { ETag: '"new"', ContentLength: 70,
       Metadata: { 'image-optimizer-version': '1', 'image-optimizer-job-id': String(job.id), 'image-optimizer-item-id': String(item.id) } }
-    if (command instanceof GetObjectCommand) return { ETag: '"new"', ContentLength: 70,
-      Body: { transformToByteArray: async () => optimized } }
+    if (command instanceof GetObjectCommand) {
+      const bytes = command.input.Key === backupKey ? original : optimized
+      return { ETag: '"new"', ContentLength: bytes.length, Body: { transformToByteArray: async () => bytes } }
+    }
     throw new Error('A recovered upload must not be written again')
   })
   await runNextJob()
   expect(getJobSummary(job.id)).toMatchObject({ completed: 1, failed: 0, savedBytes: 30 })
   expect(send.mock.calls.some(([command]) => command instanceof PutObjectCommand)).toBe(false)
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()?.backupVerifiedAt).toBeTruthy()
 })
 
 test('selects only known, unoptimized JPEGs matching a literal prefix and size', async () => {
@@ -168,7 +188,8 @@ test('refuses to replace a source when the backup readback differs', async () =>
   const { job } = enqueueJob({ prefix: 'safety/', minBytes: 0, preset: 'balanced',
     minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
   await runNextJob()
-  expect(getJobSummary(job.id)).toMatchObject({ completed: 0, failed: 1 })
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'needs_attention' }, completed: 0,
+    failed: 0, needsAttention: 1, finalBytes: null })
   expect(db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()?.error).toBe('Backup verification failed')
   expect(source).toEqual(original)
   expect(send.mock.calls.filter(([command]) => command instanceof PutObjectCommand && command.input.Key === key)).toHaveLength(0)
@@ -216,6 +237,109 @@ test('reconciles a successful replacement whose PUT response was lost', async ()
   expect(send.mock.calls.filter(([command]) => command instanceof PutObjectCommand && command.input.Key === key)).toHaveLength(1)
 })
 
+test('marks a successful but temporarily unverifiable replacement for attention, then reconciles it without another PUT', async () => {
+  const key = 'safety/verify-timeout.jpg'
+  const original = Buffer.alloc(100, 11)
+  const store = new Map<string, { bytes: Buffer, etag: string, metadata: Record<string, string> }>([
+    [key, { bytes: original, etag: '"old"', metadata: {} }],
+  ])
+  let failVerificationHead = false
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) {
+      if (failVerificationHead) { failVerificationHead = false; throw new Error('HEAD timed out') }
+      const value = store.get(command.input.Key!)!
+      return { ContentLength: value.bytes.length, ETag: value.etag, Metadata: value.metadata }
+    }
+    if (command instanceof GetObjectCommand) {
+      const value = store.get(command.input.Key!)
+      if (!value) throw { $metadata: { httpStatusCode: 404 } }
+      return { ContentLength: value.bytes.length, ETag: value.etag,
+        Body: { transformToByteArray: async () => value.bytes } }
+    }
+    if (command instanceof PutObjectCommand) {
+      const keyToWrite = command.input.Key!
+      store.set(keyToWrite, { bytes: Buffer.from(command.input.Body as Buffer), etag: '"new"', metadata: command.input.Metadata ?? {} })
+      if (keyToWrite === key) failVerificationHead = true
+      return { ETag: '"new"' }
+    }
+    throw new Error('Unexpected command')
+  })
+  compress.mockResolvedValue({ output: Buffer.alloc(70, 11), width: 10, height: 10 })
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'safety/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({ key, scanId: scan.id, etag: '"old"', size: 100, isJpeg: true,
+    isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
+  const { job } = enqueueJob({ prefix: key, minBytes: 0, preset: 'balanced', minimumSavingPercent: 15,
+    preserveMetadata: true, backupOriginals: true })
+  await runNextJob()
+  expect(store.get(key)?.bytes.length).toBe(70)
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'needs_attention' }, completed: 0,
+    needsAttention: 1, finalBytes: null, savedBytes: null })
+  expect(db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()).toMatchObject({
+    backupVerifiedAt: expect.any(String), replacementAttemptedAt: expect.any(String),
+  })
+  enqueueReconciliation(job.id)
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'completed' }, completed: 1,
+    needsAttention: 0, finalBytes: 70, savedBytes: 30 })
+  expect(send.mock.calls.filter(([command]) => command instanceof PutObjectCommand && command.input.Key === key)).toHaveLength(1)
+})
+
+test('retries only after confirming the original and verified backup still match', async () => {
+  const key = 'safety/put-timeout.jpg'
+  const original = Buffer.alloc(100, 12)
+  const store = new Map<string, { bytes: Buffer, etag: string, metadata: Record<string, string> }>([
+    [key, { bytes: original, etag: '"old"', metadata: {} }],
+  ])
+  let sourcePuts = 0
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) {
+      const value = store.get(command.input.Key!)!
+      return { ContentLength: value.bytes.length, ETag: value.etag, Metadata: value.metadata }
+    }
+    if (command instanceof GetObjectCommand) {
+      const value = store.get(command.input.Key!)
+      if (!value) throw { $metadata: { httpStatusCode: 404 } }
+      return { ContentLength: value.bytes.length, ETag: value.etag,
+        Body: { transformToByteArray: async () => value.bytes } }
+    }
+    if (command instanceof PutObjectCommand) {
+      const keyToWrite = command.input.Key!
+      if (command.input.IfNoneMatch === '*' && store.has(keyToWrite)) throw { $metadata: { httpStatusCode: 412 } }
+      if (keyToWrite === key && ++sourcePuts === 1) throw new Error('PUT timed out before upload')
+      store.set(keyToWrite, { bytes: Buffer.from(command.input.Body as Buffer), etag: '"new"', metadata: command.input.Metadata ?? {} })
+      return { ETag: '"new"' }
+    }
+    throw new Error('Unexpected command')
+  })
+  compress.mockResolvedValue({ output: Buffer.alloc(70, 12), width: 10, height: 10 })
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'safety/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({ key, scanId: scan.id, etag: '"old"', size: 100, isJpeg: true,
+    isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
+  const { job } = enqueueJob({ prefix: key, minBytes: 0, preset: 'balanced', minimumSavingPercent: 15,
+    preserveMetadata: true, backupOriginals: true })
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'needs_attention' }, needsAttention: 1, finalBytes: null })
+  expect(store.get(key)?.bytes).toEqual(original)
+  const backupKey = db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()!.backupKey!
+  store.set(backupKey, { bytes: Buffer.alloc(100, 99), etag: '"corrupt"', metadata: {} })
+  enqueueReconciliation(job.id)
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'needs_attention' }, needsAttention: 1, finalBytes: null })
+  expect(db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()?.error)
+    .toContain('Backup hash differs')
+  expect(sourcePuts).toBe(1)
+  store.delete(backupKey)
+  enqueueReconciliation(job.id)
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'completed' }, completed: 1, savedBytes: 30 })
+  expect(store.get(backupKey)?.bytes).toEqual(original)
+  expect(sourcePuts).toBe(2)
+  expect(send.mock.calls.filter(([command]) => command instanceof PutObjectCommand && command.input.Key === key)
+    .every(([command]) => command.input.IfMatch === '"old"')).toBe(true)
+})
+
 test('accepts a matching preexisting backup but never overwrites a source changed before replacement', async () => {
   const key = 'safety/conflict.jpg'
   const original = Buffer.alloc(100, 6)
@@ -241,7 +365,7 @@ test('accepts a matching preexisting backup but never overwrites a source change
     minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
   await runNextJob()
   const item = db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()
-  expect(item).toMatchObject({ status: 'failed', error: 'Object changed before replacement; verified backup was retained' })
+  expect(item).toMatchObject({ status: 'needs_attention', error: expect.stringContaining('Source differs') })
   expect(item?.backupKey).toBeTruthy()
   expect(changed).toBe(true)
   expect(db.select().from(objects).where(eq(objects.key, key)).get()?.isOptimized).toBe(false)

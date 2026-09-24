@@ -8,8 +8,9 @@ export default defineEventHandler(async (event) => {
   if (body?.prefix !== undefined && typeof body.prefix !== 'string') throw createError({ statusCode: 400, statusMessage: 'Prefix must be a string' })
   const prefix = (body?.prefix ?? '') as string
   if (prefix.length > 1024) throw createError({ statusCode: 400, statusMessage: 'Invalid prefix' })
-  const activeJob = getDatabase().select({ id: optimizationJobs.id }).from(optimizationJobs).where(inArray(optimizationJobs.status, ['queued', 'running'])).get()
-  if (activeJob) throw createError({ statusCode: 409, statusMessage: 'Wait for the optimization job to finish before scanning' })
+  const activeJob = getDatabase().select({ id: optimizationJobs.id }).from(optimizationJobs)
+    .where(inArray(optimizationJobs.status, ['queued', 'running', 'needs_attention'])).get()
+  if (activeJob) throw createError({ statusCode: 409, statusMessage: 'Resolve the optimization job before scanning' })
   try {
     const result = enqueueScan(prefix)
     setResponseStatus(event, result.created ? 202 : 200)
