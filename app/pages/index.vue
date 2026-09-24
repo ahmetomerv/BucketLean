@@ -12,7 +12,6 @@ const actionError = ref('')
 const preset = ref<'archival' | 'balanced' | 'aggressive'>('balanced')
 const minimumSavingPercent = ref(15)
 const preserveMetadata = ref(true)
-const backupOriginals = ref(true)
 const deleteBackupAfterOptimization = ref(false)
 const acknowledged = ref(false)
 
@@ -58,7 +57,7 @@ async function startJob() {
     await $fetch('/api/jobs', { method: 'POST', body: {
       bucketId: bucketId.value, prefix: prefix.value, minBytes: filters.value.minBytes, preset: preset.value,
       minimumSavingPercent: minimumSavingPercent.value, preserveMetadata: preserveMetadata.value,
-      backupOriginals: backupOriginals.value, deleteBackupAfterOptimization: deleteBackupAfterOptimization.value,
+      deleteBackupAfterOptimization: deleteBackupAfterOptimization.value,
     } })
     acknowledged.value = false
     await refreshJobs()
@@ -149,12 +148,11 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         <label class="text-xs font-medium text-slate-600">JPEG preset<select v-model="preset" :disabled="jobActive" class="mt-1 block w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm"><option value="archival">Archival · quality 90</option><option value="balanced">Balanced · quality 82</option><option value="aggressive">Aggressive · quality 72</option></select></label>
         <label class="text-xs font-medium text-slate-600">Minimum saving (%)<input v-model.number="minimumSavingPercent" :disabled="jobActive" type="number" min="1" max="99" step="1" class="mt-1 block w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm"></label>
         <label class="flex items-center gap-2 self-end pb-2 text-sm text-slate-700"><input v-model="preserveMetadata" :disabled="jobActive" type="checkbox"> Preserve photo metadata</label>
-        <label class="flex items-center gap-2 self-end pb-2 text-sm text-slate-700"><input v-model="backupOriginals" type="checkbox" disabled> Back up originals (required)</label>
       </div>
-      <label class="mt-4 flex items-start gap-2 text-sm text-slate-700"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="mt-1"> Delete each original backup after the optimized image is verified. This frees storage but removes the restore copy.</label>
+      <label class="mt-4 flex items-start gap-2 text-sm text-slate-700"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="mt-1"> Delete the original backup after successful optimization. The optimized image stays at its original key; deleting the backup removes the restore copy.</label>
       <div class="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
         <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="acknowledged" :disabled="jobActive" type="checkbox"> I understand qualifying originals will be replaced after backup.</label>
-        <button :disabled="!bucketId || !acknowledged || !backupOriginals || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !overview.totals.eligible || scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(overview.totals.eligible)} JPEGs` }}</button>
+        <button :disabled="!bucketId || !acknowledged || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !overview.totals.eligible || scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(overview.totals.eligible)} JPEGs` }}</button>
       </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
       <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">

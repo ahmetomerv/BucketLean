@@ -84,6 +84,8 @@ test('scan sends its prefix and refreshes the displayed results', async () => {
 test('job start requires acknowledgment and submits the selected settings', async () => {
   setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 2, metadataErrorCount: 0, startedAt: null }, eligible: 2 })
   const { wrapper, button, inputFor } = await renderPage()
+  expect(wrapper.text()).not.toContain('Back up originals (required)')
+  expect(wrapper.text()).toContain('Each original is backed up before replacement.')
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await inputFor('Key prefix').setValue('photos/')
   await inputFor('Minimum MiB').setValue('2')
@@ -96,7 +98,7 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   await flushPromises()
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: {
     bucketId: 'default', prefix: 'photos/', minBytes: 2 * 1048576, preset: 'archival', minimumSavingPercent: 25,
-    preserveMetadata: false, backupOriginals: true, deleteBackupAfterOptimization: false,
+    preserveMetadata: false, deleteBackupAfterOptimization: false,
   } })
   expect(refreshJobs).toHaveBeenCalledOnce()
   expect((inputFor('I understand').element as HTMLInputElement).checked).toBe(false)
@@ -161,18 +163,18 @@ test('switching buckets sends the selected profile ID and clears the previous sc
   wrapper.unmount()
 })
 
-test('backup deletion is opt-in and is sent with the job request', async () => {
+test('backup cleanup is opt-in while required backup creation stays implicit', async () => {
   setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1,
     metadataErrorCount: 0, startedAt: null }, eligible: 1 })
   const { wrapper, button, inputFor } = await renderPage()
-  const deletion = inputFor('Delete each original backup')
+  const deletion = inputFor('Delete the original backup')
   expect((deletion.element as HTMLInputElement).checked).toBe(false)
   await deletion.setValue(true)
   await inputFor('I understand').setValue(true)
   await button('Start job').trigger('click')
   await flushPromises()
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: expect.objectContaining({
-    deleteBackupAfterOptimization: true, backupOriginals: true,
+    deleteBackupAfterOptimization: true,
   }) })
   wrapper.unmount()
 })

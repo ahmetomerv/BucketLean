@@ -94,7 +94,7 @@ Create a job from the selected bucket's latest **completed** scan. This operatio
 | `preset` | `archival`, `balanced`, or `aggressive` | `balanced` | JPEG qualities 90, 82, or 72. |
 | `minimumSavingPercent` | integer from 1 to 99 | `15` | Required saving before replacement. |
 | `preserveMetadata` | boolean | `true` | Require selected EXIF/ICC data to survive optimization. |
-| `backupOriginals` | boolean | `true` | Must remain `true` in this MVP. |
+| `backupOriginals` | boolean | `true` | Optional compatibility field. Omit it; backups are always required. Explicit `false` is rejected. |
 | `deleteBackupAfterOptimization` | boolean | `false` | After verifying the optimized source, delete its original backup and restore manifest. Removes the per-image restore copy. |
 
 ```json
@@ -105,7 +105,6 @@ Create a job from the selected bucket's latest **completed** scan. This operatio
   "preset": "balanced",
   "minimumSavingPercent": 15,
   "preserveMetadata": true,
-  "backupOriginals": true,
   "deleteBackupAfterOptimization": false
 }
 ```

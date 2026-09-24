@@ -30,7 +30,7 @@ curl --fail-with-body --user operator \
 # 4. Start a job only after reviewing the completed scan and candidates.
 curl --fail-with-body --user operator \
   --header 'Content-Type: application/json' \
-  --data "{\"bucketId\":\"$OPTIMIZER_BUCKET_ID\",\"prefix\":\"photos/test/\",\"minBytes\":1048576,\"preset\":\"balanced\",\"minimumSavingPercent\":15,\"preserveMetadata\":true,\"backupOriginals\":true,\"deleteBackupAfterOptimization\":false}" \
+  --data "{\"bucketId\":\"$OPTIMIZER_BUCKET_ID\",\"prefix\":\"photos/test/\",\"minBytes\":1048576,\"preset\":\"balanced\",\"minimumSavingPercent\":15,\"preserveMetadata\":true,\"deleteBackupAfterOptimization\":false}" \
   "$OPTIMIZER_URL/api/jobs"
 
 # 5. Use the returned job.id; repeat until it is terminal or needs intervention.
