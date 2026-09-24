@@ -103,10 +103,14 @@ test('object filters and overview counts use the latest scan and a literal prefi
   expect(await response.json()).toMatchObject({ total: 1, items: [{ key: 'photos/%-done.jpeg' }] })
   const unknown = await call(`/api/objects?prefix=${prefix}&status=unknown`)
   expect(await unknown.json()).toMatchObject({ total: 1, items: [{ key: 'photos/%-unknown.jpg' }] })
+  const unoptimized = await call(`/api/objects?prefix=${prefix}&status=not_optimized`)
+  expect(await unoptimized.json()).toMatchObject({ total: 1, items: [{ key: 'photos/%-pending.jpg' }] })
   const overview = await call(`/api/overview?prefix=${prefix}&minBytes=250`)
   expect(await overview.json()).toMatchObject({ scan: { id: scan.id }, totals: {
     objects: 4, jpegs: 3, jpegBytes: 900, optimized: 1, eligible: 0, metadataUnknown: 1,
   } })
+  const eligible = await call(`/api/overview?prefix=${prefix}&minBytes=0`)
+  expect(await eligible.json()).toMatchObject({ totals: { eligible: 1, metadataUnknown: 1 } })
 })
 
 test('rejects invalid filters, job settings, IDs and pages at the HTTP boundary', async () => {

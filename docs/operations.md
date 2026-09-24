@@ -21,7 +21,16 @@ node --env-file=.env scripts/backfill-manifests.mjs
 node --env-file=.env scripts/backfill-manifests.mjs --apply
 ```
 
-The script refuses a database bound to a different bucket. If an older populated database has no bucket identity, verify its bucket with `--verify-unbound`, then bind it with `scripts/bind-legacy-db.mjs` before `--apply`. The backfill reads SQLite but does not modify job rows.
+The script refuses a database bound to a different bucket. If an older populated database has no bucket identity, verify its bucket with `--verify-unbound`, stop the app, and take a SQLite snapshot. Then bind that database before `--apply` using the endpoint and bucket you verified:
+
+```sh
+node --env-file=.env scripts/backfill-manifests.mjs --verify-unbound
+node --env-file=.env scripts/bind-legacy-db.mjs \
+  --confirm-endpoint https://ACCOUNT_ID.r2.cloudflarestorage.com/ \
+  --confirm-bucket YOUR_BUCKET
+```
+
+The binding script compares those values with `R2_ENDPOINT` and `R2_BUCKET`, refuses a mismatch, and does not contact R2. The backfill reads SQLite but does not modify job rows.
 
 ## Prove that a backup restores
 

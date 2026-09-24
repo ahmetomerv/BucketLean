@@ -128,7 +128,7 @@ npm run test:coverage
 npm run check
 ```
 
-The suite covers the dashboard actions, HTTP authentication and validation, scan persistence and recovery, candidate filtering, image and metadata validation, backup and manifest verification, replacement reconciliation, durable retry deadlines and exhaustion, credential pause and resume, failure classification, bucket binding, worker lease takeover, SQLite snapshots, and database migration. Tests use temporary SQLite databases, local JPEG fixtures, and mocked R2 operations. They do not need R2 credentials or write to a real bucket. `npm run check` runs coverage, typechecking, a production build, and a built-server smoke check; GitHub Actions runs it on Node 22 and 24. The coverage gate catches large regressions, but a passing percentage alone does not prove every failure mode is covered.
+The suite covers the dashboard actions, HTTP authentication and validation, scan persistence and recovery, candidate filtering, image and metadata validation, backup and manifest verification, replacement reconciliation, durable retry deadlines and exhaustion, credential pause and resume, failure classification, bucket binding, worker lease takeover, SQLite snapshots, and database migration. Tests use temporary SQLite databases, local JPEG fixtures, and mocked R2 operations. They do not need R2 credentials or write to a real bucket. `npm run check` runs coverage, typechecking, an app build and built-server smoke check, plus the static docs build and dev-server smoke checks; GitHub Actions runs it on Node 22 and 24. The coverage gate catches large regressions, but a passing percentage alone does not prove every failure mode is covered.
 
 ### Performance baseline
 

@@ -14,6 +14,16 @@ npm run dev
 
 Set `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `APP_PASSWORD` in `.env`. The local database defaults to `.data/optimizer.sqlite`; set `DATABASE_PATH` to use another location. Open `http://localhost:3000` and sign in with any username and the configured app password. Keep the R2 credentials on the server and use HTTPS when deploying the app.
 
+## Ways to use the running app
+
+| Way | What it supports | Where to start |
+| --- | --- | --- |
+| Dashboard | Scan, review JPEGs, start a job, and resume or reconcile a blocked job. | Open the private app at `http://localhost:3000`. |
+| HTTP API | Perform the same scan and job actions from `curl`, a script, or another client. Work remains asynchronous in the server worker. | Follow the [API workflow](../api/workflow.md) and [endpoint reference](../api/endpoints.md). |
+| Recovery commands | Snapshot SQLite, backfill older backup manifests, and verify or drill a restore. These commands run on the app host with its environment and are separate from normal optimization jobs. | See [Operations and recovery](../operations.md). |
+
+The static documentation site is a separate build and does not run scans or jobs. The project has no standalone optimization CLI, scheduled-job endpoint, or webhook; automation calls the running HTTP API.
+
 ## First safe run
 
 1. Scan a narrow prefix containing one or two known JPEGs. Scanning reads R2 but does not change objects.

@@ -50,7 +50,7 @@ Returns `200`. `scan` is `null` before the first scan. `totals` includes `object
 }
 ```
 
-`eligible` is a preview count of unoptimized JPEGs at the selected size. It can include rows whose metadata lookup returned `unknown`; those rows are excluded when creating a job. The worker also rechecks each source before replacement.
+`eligible` is a preview count of JPEGs at the selected size whose metadata check confirmed they are not already optimized. An `unknown` metadata result has `isOptimized: null` and is excluded from this count and from job creation. The worker also rechecks each source before replacement.
 
 ### `GET /api/objects`
 
@@ -63,7 +63,7 @@ List JPEG discovery rows from the latest scan, sorted by key. Query parameters:
 | `status` | `all`, `optimized`, `not_optimized`, or `unknown` | `all` | Filter by optimizer/metadata state. |
 | `page` | positive safe integer | `1` | One-based page number. |
 
-Returns `200` with `{ "items": [...], "total": 25, "page": 1, "pageSize": 100 }`. Each item includes its `key`, `etag`, `size`, `isJpeg`, `isOptimized`, `metadataStatus`, and `metadataError`. `total` is the count **after** filters. The endpoint lists JPEGs only; `unknown` means the JPEG metadata lookup failed, so it cannot enter a job.
+Returns `200` with `{ "items": [...], "total": 25, "page": 1, "pageSize": 100 }`. Each item includes its `key`, `etag`, `size`, `isJpeg`, `isOptimized`, `metadataStatus`, and `metadataError`. `total` is the count **after** filters. The endpoint lists JPEGs only. `status=all` includes JPEGs with unknown metadata; `status=not_optimized` includes only confirmed unoptimized JPEGs. Use `status=unknown` to inspect metadata failures, which cannot enter a job.
 
 ## Jobs
 

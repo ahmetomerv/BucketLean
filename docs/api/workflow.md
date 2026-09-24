@@ -16,7 +16,7 @@ curl --fail-with-body --user operator \
   --get --data-urlencode 'prefix=photos/test/' \
   "$OPTIMIZER_URL/api/overview"
 
-# 3. Inspect candidate keys. Request subsequent pages if total exceeds 100.
+# 3. Inspect confirmed unoptimized candidate keys. Request subsequent pages if total exceeds 100.
 curl --fail-with-body --user operator \
   --get --data-urlencode 'prefix=photos/test/' \
   --data-urlencode 'minBytes=1048576' \
@@ -36,5 +36,15 @@ curl --fail-with-body --user operator "$OPTIMIZER_URL/api/jobs/42"
 Do not make the job request immediately after the scan request: `202` only means it was queued. Check `scan.status` first. A job can end as `completed`, `completed_with_errors`, `paused`, or `needs_attention`; automation should report the last three for review. `sourceChanged` is a separate count, and final byte totals may be `null` when a source changed outside the job.
 
 If credentials or the bucket failed, correct the server configuration and call `POST /api/jobs/:id/resume`. If remote replacement state is uncertain, inspect the item's backup key, hashes, and error, then call `POST /api/jobs/:id/reconcile`. Avoid automatically repeating `POST /api/jobs` on a timeout: the first request may already have created a job. Use `GET /api/jobs` and the known job ID to check before retrying. The API has no idempotency-key feature yet.
+
+After reviewing job `42`, use only the action that matches its current status:
+
+```sh
+# For a paused job, after correcting access or configuration:
+curl --fail-with-body --user operator --request POST "$OPTIMIZER_URL/api/jobs/42/resume"
+
+# For a needs_attention job, after inspecting its item and remote state:
+curl --fail-with-body --user operator --request POST "$OPTIMIZER_URL/api/jobs/42/reconcile"
+```
 
 For every endpoint, see the [reference](./endpoints.md). For backup and database recovery outside the HTTP API, see [Operations and recovery](../operations.md).
