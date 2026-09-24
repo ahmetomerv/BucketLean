@@ -1,7 +1,15 @@
-import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+
+export const bucketProfiles = sqliteTable('bucket_profiles', {
+  id: text('id').primaryKey(),
+  endpoint: text('endpoint').notNull(),
+  bucket: text('bucket').notNull(),
+  createdAt: text('created_at').notNull(),
+})
 
 export const scans = sqliteTable('scans', {
   id: integer('id').primaryKey({ autoIncrement: true }),
+  bucketId: text('bucket_id').notNull().references(() => bucketProfiles.id),
   prefix: text('prefix').notNull(),
   status: text('status', { enum: ['queued', 'running', 'completed', 'failed'] }).notNull(),
   discoveredCount: integer('discovered_count').notNull().default(0),
@@ -15,7 +23,8 @@ export const scans = sqliteTable('scans', {
 })
 
 export const objects = sqliteTable('objects', {
-  key: text('key').primaryKey(),
+  bucketId: text('bucket_id').notNull().references(() => bucketProfiles.id),
+  key: text('key').notNull(),
   scanId: integer('scan_id').notNull().references(() => scans.id),
   etag: text('etag'),
   size: integer('size').notNull(),
@@ -28,10 +37,11 @@ export const objects = sqliteTable('objects', {
   optimizedSize: integer('optimized_size'),
   savedPercent: integer('saved_percent'),
   discoveredAt: text('discovered_at').notNull(),
-})
+}, table => [primaryKey({ columns: [table.bucketId, table.key] })])
 
 export const optimizationJobs = sqliteTable('optimization_jobs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
+  bucketId: text('bucket_id').notNull().references(() => bucketProfiles.id),
   scanId: integer('scan_id').references(() => scans.id),
   prefix: text('prefix').notNull().default(''),
   minBytes: integer('min_bytes').notNull().default(0),
@@ -40,6 +50,7 @@ export const optimizationJobs = sqliteTable('optimization_jobs', {
   preset: text('preset', { enum: ['archival', 'balanced', 'aggressive'] }).notNull(),
   minimumSavingPercent: integer('minimum_saving_percent').notNull().default(15),
   backupOriginals: integer('backup_originals', { mode: 'boolean' }).notNull().default(true),
+  deleteBackupAfterOptimization: integer('delete_backup_after_optimization', { mode: 'boolean' }).notNull().default(false),
   preserveMetadata: integer('preserve_metadata', { mode: 'boolean' }).notNull().default(true),
   createdAt: text('created_at').notNull(),
   startedAt: text('started_at'),
@@ -54,7 +65,7 @@ export const optimizationItems = sqliteTable('optimization_items', {
   originalSize: integer('original_size').notNull(),
   optimizedSize: integer('optimized_size'),
   savedPercent: integer('saved_percent'),
-  status: text('status', { enum: ['pending', 'downloading', 'processing', 'uploading', 'retry_wait', 'completed', 'skipped', 'source_changed', 'invalid_jpeg', 'failed', 'needs_attention'] }).notNull(),
+  status: text('status', { enum: ['pending', 'downloading', 'processing', 'uploading', 'cleanup_pending', 'retry_wait', 'completed', 'skipped', 'source_changed', 'invalid_jpeg', 'failed', 'needs_attention'] }).notNull(),
   error: text('error'),
   errorKind: text('error_kind'),
   attemptCount: integer('attempt_count').notNull().default(0),
@@ -67,16 +78,12 @@ export const optimizationItems = sqliteTable('optimization_items', {
   backupVerifiedAt: text('backup_verified_at'),
   manifestVerifiedAt: text('manifest_verified_at'),
   replacementAttemptedAt: text('replacement_attempted_at'),
+  cleanupPendingAt: text('cleanup_pending_at'),
+  backupDeletedAt: text('backup_deleted_at'),
+  manifestDeletedAt: text('manifest_deleted_at'),
   createdAt: text('created_at').notNull(),
   startedAt: text('started_at'),
   finishedAt: text('finished_at'),
-})
-
-export const databaseIdentity = sqliteTable('database_identity', {
-  id: integer('id').primaryKey(),
-  endpoint: text('endpoint').notNull(),
-  bucket: text('bucket').notNull(),
-  boundAt: text('bound_at').notNull(),
 })
 
 export const workerLeases = sqliteTable('worker_lease', {

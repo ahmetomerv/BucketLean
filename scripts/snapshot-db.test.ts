@@ -15,8 +15,9 @@ test('creates a consistent, integrity-checked SQLite snapshot while WAL writes r
   try {
     live.pragma('journal_mode = WAL')
     live.exec(`
-      CREATE TABLE database_identity (id INTEGER PRIMARY KEY, endpoint TEXT, bucket TEXT);
-      INSERT INTO database_identity VALUES (1, 'https://example.invalid/', 'test-bucket');
+      CREATE TABLE bucket_profiles (id TEXT PRIMARY KEY, endpoint TEXT, bucket TEXT);
+      INSERT INTO bucket_profiles VALUES ('one', 'https://example.invalid/', 'test-bucket');
+      INSERT INTO bucket_profiles VALUES ('two', 'https://example.invalid/', 'second-bucket');
       CREATE TABLE optimization_jobs (id INTEGER PRIMARY KEY);
       CREATE TABLE optimization_items (id INTEGER PRIMARY KEY);
       INSERT INTO optimization_jobs VALUES (1);
@@ -26,7 +27,10 @@ test('creates a consistent, integrity-checked SQLite snapshot while WAL writes r
       env: { ...process.env, DATABASE_PATH: sourcePath }, encoding: 'utf8',
     })
     expect(result.status, result.stderr).toBe(0)
-    expect(JSON.parse(result.stdout)).toMatchObject({ bucket: 'test-bucket', jobs: 1, items: 1, integrity: 'ok' })
+    expect(JSON.parse(result.stdout)).toMatchObject({ buckets: [
+      { id: 'one', endpoint: 'https://example.invalid/', bucket: 'test-bucket' },
+      { id: 'two', endpoint: 'https://example.invalid/', bucket: 'second-bucket' },
+    ], jobs: 1, items: 1, integrity: 'ok' })
     live.exec('INSERT INTO optimization_items VALUES (2)')
     const snapshot = new Database(outputPath, { readonly: true })
     expect(snapshot.prepare('SELECT count(*) AS count FROM optimization_items').get()).toEqual({ count: 1 })
@@ -42,7 +46,7 @@ test('creates a consistent, integrity-checked SQLite snapshot while WAL writes r
   }
 })
 
-test('preserves an unbound legacy database without claiming a bucket identity', () => {
+test('snapshots a database with no configured profiles', () => {
   const dir = mkdtempSync(join(tmpdir(), 'r2-legacy-snapshot-test-'))
   const sourcePath = join(dir, 'legacy.sqlite')
   const outputPath = join(dir, 'snapshot.sqlite')
@@ -50,7 +54,7 @@ test('preserves an unbound legacy database without claiming a bucket identity', 
   const live = new Database(sourcePath)
   try {
     live.exec(`
-      CREATE TABLE database_identity (id INTEGER PRIMARY KEY, endpoint TEXT, bucket TEXT);
+      CREATE TABLE bucket_profiles (id TEXT PRIMARY KEY, endpoint TEXT, bucket TEXT);
       CREATE TABLE optimization_jobs (id INTEGER PRIMARY KEY);
       CREATE TABLE optimization_items (id INTEGER PRIMARY KEY);
       INSERT INTO optimization_jobs VALUES (1);
@@ -59,7 +63,7 @@ test('preserves an unbound legacy database without claiming a bucket identity', 
       env: { ...process.env, DATABASE_PATH: sourcePath }, encoding: 'utf8',
     })
     expect(result.status, result.stderr).toBe(0)
-    expect(JSON.parse(result.stdout)).toMatchObject({ bucket: null, jobs: 1, items: 0, integrity: 'ok' })
+    expect(JSON.parse(result.stdout)).toMatchObject({ buckets: [], jobs: 1, items: 0, integrity: 'ok' })
   } finally {
     live.close()
     rmSync(dir, { recursive: true, force: true })

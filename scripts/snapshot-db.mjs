@@ -22,7 +22,7 @@ try {
   snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true })
   const integrity = snapshot.pragma('integrity_check', { simple: true })
   if (integrity !== 'ok') throw new Error(`Snapshot integrity check failed: ${integrity}`)
-  const identity = snapshot.prepare('SELECT endpoint, bucket FROM database_identity WHERE id = 1').get()
+  const buckets = snapshot.prepare('SELECT id, endpoint, bucket FROM bucket_profiles ORDER BY id').all()
   const counts = snapshot.prepare(`SELECT
     (SELECT count(*) FROM optimization_jobs) AS jobs,
     (SELECT count(*) FROM optimization_items) AS items`).get()
@@ -30,7 +30,7 @@ try {
   snapshot = undefined
   chmodSync(temporaryPath, 0o600)
   linkSync(temporaryPath, outputPath) // Refuses to replace an existing snapshot.
-  console.log(JSON.stringify({ output: outputPath, bucket: identity?.bucket ?? null, jobs: counts.jobs,
+  console.log(JSON.stringify({ output: outputPath, buckets, jobs: counts.jobs,
     items: counts.items, integrity }))
 } finally {
   snapshot?.close()

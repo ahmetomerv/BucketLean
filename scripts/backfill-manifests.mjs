@@ -1,20 +1,21 @@
+import { bucketConfig } from '../shared/r2-profiles.mjs'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import Database from 'better-sqlite3'
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 const apply = process.argv.includes('--apply')
-const verifyLegacy = process.argv.includes('--verify-unbound')
-if (process.argv.length !== 2 + (apply ? 1 : 0) + (verifyLegacy ? 1 : 0) || (apply && verifyLegacy)) {
-  throw new Error('Usage: node scripts/backfill-manifests.mjs [--apply | --verify-unbound]')
+const bucketIndex = process.argv.indexOf('--bucket-id')
+const bucketId = bucketIndex >= 0 ? process.argv[bucketIndex + 1] : undefined
+if (process.argv.length !== 2 + (apply ? 1 : 0) + (bucketIndex >= 0 ? 2 : 0) ||
+  (bucketIndex >= 0 && !bucketId)) {
+  throw new Error('Usage: node scripts/backfill-manifests.mjs [--bucket-id ID] [--apply]')
 }
-const { R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env
-if (!R2_ENDPOINT || !R2_BUCKET || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) throw new Error('R2 configuration is incomplete')
-const endpoint = new URL(R2_ENDPOINT)
-if (endpoint.protocol !== 'https:') throw new Error('R2 endpoint must use HTTPS')
+const profile = bucketConfig(bucketId)
+const R2_BUCKET = profile.bucket
 const db = new Database(process.env.DATABASE_PATH || '.data/optimizer.sqlite', { readonly: true, fileMustExist: true })
-const client = new S3Client({ endpoint: endpoint.toString(), region: 'auto',
-  credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY } })
+const client = new S3Client({ endpoint: profile.endpoint, region: 'auto',
+  credentials: { accessKeyId: profile.accessKeyId, secretAccessKey: profile.secretAccessKey } })
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const headers = head => ({ contentType: head.ContentType ?? 'image/jpeg', cacheControl: head.CacheControl ?? null,
   contentDisposition: head.ContentDisposition ?? null, contentEncoding: head.ContentEncoding ?? null,
@@ -22,15 +23,16 @@ const headers = head => ({ contentType: head.ContentType ?? 'image/jpeg', cacheC
   metadata: head.Metadata ?? {} })
 
 try {
-  const identity = db.prepare('SELECT endpoint, bucket FROM database_identity WHERE id = 1').get()
-  if ((!identity && !verifyLegacy) || (identity &&
-    (identity.endpoint !== endpoint.toString() || identity.bucket !== R2_BUCKET))) {
-    throw new Error('SQLite bucket identity does not match the configured R2 bucket')
+  const identity = db.prepare('SELECT endpoint, bucket FROM bucket_profiles WHERE id = ?').get(profile.id)
+  if (!identity || identity.endpoint !== profile.endpoint || identity.bucket !== profile.bucket) {
+    throw new Error('SQLite bucket profile does not match the selected R2 bucket')
   }
   const rows = db.prepare(`SELECT i.id AS itemId, i.job_id AS jobId, i.key AS originalKey,
     i.etag AS originalETag, i.backup_key AS backupKey, i.original_sha256 AS sha256, i.original_size AS size
-    FROM optimization_items i WHERE i.status = 'completed' AND i.backup_key IS NOT NULL
-    AND i.original_sha256 IS NOT NULL ORDER BY i.id`).all()
+    FROM optimization_items i JOIN optimization_jobs j ON j.id = i.job_id
+    WHERE j.bucket_id = ? AND i.status = 'completed' AND i.backup_key IS NOT NULL
+    AND i.backup_deleted_at IS NULL
+    AND i.original_sha256 IS NOT NULL ORDER BY i.id`).all(profile.id)
   let verified = 0
   let written = 0
   for (const row of rows) {

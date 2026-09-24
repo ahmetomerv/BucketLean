@@ -10,7 +10,7 @@ const refreshJobs = vi.fn(async () => {})
 const post = vi.fn(async () => ({}))
 
 type DashboardData = {
-  scan?: { id: number, status: string, prefix: string, discoveredCount: number, metadataErrorCount: number, startedAt: string | null } | null
+  scan?: { id: number, bucketId: string, status: string, prefix: string, discoveredCount: number, metadataErrorCount: number, startedAt: string | null } | null
   eligible?: number
   activeJob?: boolean
   attentionJob?: boolean
@@ -20,17 +20,21 @@ type DashboardData = {
 function setupData({ scan = null, eligible = 0, activeJob = false, attentionJob = false, pausedJob = false }: DashboardData = {}) {
   const overview = ref({ scan, totals: { objects: 0, jpegs: eligible, jpegBytes: 0, optimized: 0, eligible, metadataUnknown: 0 } })
   const objects = ref({ items: [], total: 0, page: 1, pageSize: 100 })
-  const attentionSummary = { job: { id: 1, status: 'needs_attention' },
+  const attentionSummary = { job: { id: 1, bucketId: 'default', status: 'needs_attention' },
     total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 1,
     originalBytes: 100, finalBytes: null, savedBytes: null, savedPercent: null, current: null, nextRetryAt: null }
   const jobs = ref({ jobs: attentionJob ? [
-    { ...attentionSummary, job: { id: 2, status: 'completed' }, needsAttention: 0,
+    { ...attentionSummary, job: { id: 2, bucketId: 'default', status: 'completed' }, needsAttention: 0,
       finalBytes: 70, savedBytes: 30, savedPercent: 30 }, attentionSummary,
-  ] : activeJob || pausedJob ? [{ job: { id: 1, status: pausedJob ? 'paused' : 'running', pauseReason: pausedJob ? 'credentials: Access denied' : null },
+  ] : activeJob || pausedJob ? [{ job: { id: 1, bucketId: 'default', status: pausedJob ? 'paused' : 'running', pauseReason: pausedJob ? 'credentials: Access denied' : null },
     total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 0,
     originalBytes: 100, finalBytes: 100, savedBytes: 0,
     savedPercent: 0, current: null, nextRetryAt: null }] : [] })
   vi.stubGlobal('useFetch', (url: string) => {
+    if (url === '/api/buckets') return { data: ref({ buckets: [
+      { id: 'default', endpoint: 'https://example.r2.cloudflarestorage.com/', bucket: 'test' },
+      { id: 'media', endpoint: 'https://example.r2.cloudflarestorage.com/', bucket: 'media' },
+    ] }) }
     if (url === '/api/overview') return { data: overview, refresh: refreshOverview }
     if (url === '/api/objects') return { data: objects, refresh: refreshObjects }
     if (url === '/api/jobs') return { data: jobs, refresh: refreshJobs }
@@ -71,14 +75,14 @@ test('scan sends its prefix and refreshes the displayed results', async () => {
   await inputFor('Scan prefix').setValue('photos/test/')
   await button('Start scan').trigger('click')
   await flushPromises()
-  expect(post).toHaveBeenCalledWith('/api/scan', { method: 'POST', body: { prefix: 'photos/test/' } })
+  expect(post).toHaveBeenCalledWith('/api/scan', { method: 'POST', body: { bucketId: 'default', prefix: 'photos/test/' } })
   expect(refreshOverview).toHaveBeenCalledOnce()
   expect(refreshObjects).toHaveBeenCalledOnce()
   wrapper.unmount()
 })
 
 test('job start requires acknowledgment and submits the selected settings', async () => {
-  setupData({ scan: { id: 1, status: 'completed', prefix: '', discoveredCount: 2, metadataErrorCount: 0, startedAt: null }, eligible: 2 })
+  setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 2, metadataErrorCount: 0, startedAt: null }, eligible: 2 })
   const { wrapper, button, inputFor } = await renderPage()
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await inputFor('Key prefix').setValue('photos/')
@@ -91,8 +95,8 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   await button('Start job').trigger('click')
   await flushPromises()
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: {
-    prefix: 'photos/', minBytes: 2 * 1048576, preset: 'archival', minimumSavingPercent: 25,
-    preserveMetadata: false, backupOriginals: true,
+    bucketId: 'default', prefix: 'photos/', minBytes: 2 * 1048576, preset: 'archival', minimumSavingPercent: 25,
+    preserveMetadata: false, backupOriginals: true, deleteBackupAfterOptimization: false,
   } })
   expect(refreshJobs).toHaveBeenCalledOnce()
   expect((inputFor('I understand').element as HTMLInputElement).checked).toBe(false)
@@ -100,7 +104,7 @@ test('job start requires acknowledgment and submits the selected settings', asyn
 })
 
 test('active work disables conflicting actions and API errors remain visible', async () => {
-  setupData({ scan: { id: 1, status: 'completed', prefix: '', discoveredCount: 1, metadataErrorCount: 0, startedAt: null }, eligible: 1, activeJob: true })
+  setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1, metadataErrorCount: 0, startedAt: null }, eligible: 1, activeJob: true })
   const active = await renderPage()
   expect(active.button('Start scan').attributes('disabled')).toBeDefined()
   expect(active.button('Job in progress').attributes('disabled')).toBeDefined()
@@ -116,7 +120,7 @@ test('active work disables conflicting actions and API errors remain visible', a
 })
 
 test('an uncertain job shows unknown totals and offers an explicit remote recheck', async () => {
-  setupData({ scan: { id: 1, status: 'completed', prefix: '', discoveredCount: 1,
+  setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1,
     metadataErrorCount: 0, startedAt: null }, eligible: 1, attentionJob: true })
   const { wrapper, button } = await renderPage()
   expect(wrapper.text()).toContain('Pending verification')
@@ -130,7 +134,7 @@ test('an uncertain job shows unknown totals and offers an explicit remote rechec
 })
 
 test('a paused job shows the access error and resumes explicitly', async () => {
-  setupData({ scan: { id: 1, status: 'completed', prefix: '', discoveredCount: 1,
+  setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1,
     metadataErrorCount: 0, startedAt: null }, eligible: 1, pausedJob: true })
   const { wrapper, button } = await renderPage()
   expect(wrapper.text()).toContain('Access denied')
@@ -140,5 +144,35 @@ test('a paused job shows the access error and resumes explicitly', async () => {
   await flushPromises()
   expect(post).toHaveBeenCalledWith('/api/jobs/1/resume', { method: 'POST' })
   expect(refreshJobs).toHaveBeenCalledOnce()
+  wrapper.unmount()
+})
+
+test('switching buckets sends the selected profile ID and clears the previous scan context', async () => {
+  setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1,
+    metadataErrorCount: 0, startedAt: null }, eligible: 1 })
+  const { wrapper, button, inputFor } = await renderPage()
+  await inputFor('R2 bucket').setValue('media')
+  await nextTick()
+  expect(button('Start job').attributes('disabled')).toBeDefined()
+  await inputFor('Scan prefix').setValue('media/test/')
+  await button('Start scan').trigger('click')
+  await flushPromises()
+  expect(post).toHaveBeenCalledWith('/api/scan', { method: 'POST', body: { bucketId: 'media', prefix: 'media/test/' } })
+  wrapper.unmount()
+})
+
+test('backup deletion is opt-in and is sent with the job request', async () => {
+  setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1,
+    metadataErrorCount: 0, startedAt: null }, eligible: 1 })
+  const { wrapper, button, inputFor } = await renderPage()
+  const deletion = inputFor('Delete each original backup')
+  expect((deletion.element as HTMLInputElement).checked).toBe(false)
+  await deletion.setValue(true)
+  await inputFor('I understand').setValue(true)
+  await button('Start job').trigger('click')
+  await flushPromises()
+  expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: expect.objectContaining({
+    deleteBackupAfterOptimization: true, backupOriginals: true,
+  }) })
   wrapper.unmount()
 })

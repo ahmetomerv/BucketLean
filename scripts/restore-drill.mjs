@@ -1,20 +1,21 @@
+import { bucketConfig } from '../shared/r2-profiles.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 const apply = process.argv.includes('--apply')
+const bucketIndex = process.argv.indexOf('--bucket-id')
+const bucketId = bucketIndex >= 0 ? process.argv[bucketIndex + 1] : undefined
 const manifestIndex = process.argv.indexOf('--manifest-key')
 const manifestArgument = manifestIndex >= 0 ? process.argv[manifestIndex + 1] : null
-const expectedLength = 2 + (apply ? 1 : 0) + (manifestIndex >= 0 ? 2 : 0)
-if (process.argv.length !== expectedLength || (manifestIndex >= 0 && !manifestArgument)) {
-  throw new Error('Usage: node scripts/restore-drill.mjs [--manifest-key KEY] [--apply]')
+const expectedLength = 2 + (apply ? 1 : 0) + (manifestIndex >= 0 ? 2 : 0) + (bucketIndex >= 0 ? 2 : 0)
+if (process.argv.length !== expectedLength || (manifestIndex >= 0 && !manifestArgument) || (bucketIndex >= 0 && !bucketId)) {
+  throw new Error('Usage: node scripts/restore-drill.mjs [--bucket-id ID] [--manifest-key KEY] [--apply]')
 }
-const { R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env
-if (!R2_ENDPOINT || !R2_BUCKET || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) throw new Error('R2 configuration is incomplete')
-const endpoint = new URL(R2_ENDPOINT)
-if (endpoint.protocol !== 'https:') throw new Error('R2 endpoint must use HTTPS')
-const client = new S3Client({ endpoint: endpoint.toString(), region: 'auto',
-  credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY } })
+const profile = bucketConfig(bucketId)
+const R2_BUCKET = profile.bucket
+const client = new S3Client({ endpoint: profile.endpoint, region: 'auto',
+  credentials: { accessKeyId: profile.accessKeyId, secretAccessKey: profile.secretAccessKey } })
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const headers = head => ({ contentType: head.ContentType ?? 'image/jpeg', cacheControl: head.CacheControl ?? null,
   contentDisposition: head.ContentDisposition ?? null, contentEncoding: head.ContentEncoding ?? null,

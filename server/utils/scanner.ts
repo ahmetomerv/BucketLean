@@ -1,9 +1,10 @@
-import { asc, eq, inArray, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 import { getDatabase } from './db'
 import { errorMessage, log } from './log'
 import { createR2Client, HeadObjectCommand, ListObjectsV2Command, r2Config } from './r2'
 import { objects, scans } from './schema'
 import { workerLease, WorkerLeaseLostError } from './worker-lease'
+import { claimWorkSlot, releaseWorkSlot } from './work-slot'
 
 export function isJpegKey(key: string) {
   return /\.(jpe?g)$/i.test(key) && !key.startsWith('__optimizer/originals/')
@@ -12,14 +13,14 @@ export function isJpegKey(key: string) {
 let stopping = false
 let active: Promise<void> | undefined
 
-export function enqueueScan(prefix: string) {
-  r2Config()
+export function enqueueScan(prefix: string, bucketId?: string) {
+  const config = r2Config(bucketId)
   const db = getDatabase()
-  const existing = db.select().from(scans).where(inArray(scans.status, ['queued', 'running'])).orderBy(asc(scans.id)).get()
+  const existing = db.select().from(scans).where(and(eq(scans.bucketId, config.id), inArray(scans.status, ['queued', 'running']))).orderBy(asc(scans.id)).get()
   if (existing) return { scan: existing, created: false }
   const now = new Date().toISOString()
-  const scan = db.insert(scans).values({ prefix, status: 'queued', createdAt: now }).returning().get()
-  log('info', 'scan_queued', { scanId: scan.id, prefix })
+  const scan = db.insert(scans).values({ bucketId: config.id, prefix, status: 'queued', createdAt: now }).returning().get()
+  log('info', 'scan_queued', { scanId: scan.id, bucketId: config.id, prefix })
   void runNextScan()
   return { scan, created: true }
 }
@@ -29,14 +30,16 @@ export function runNextScan() {
   const db = getDatabase()
   const scan = db.select().from(scans).where(inArray(scans.status, ['queued', 'running'])).orderBy(asc(scans.id)).get()
   if (!scan) return
-  try { if (!workerLease.tryAcquire()) return }
+  if (!claimWorkSlot()) return
+  try { if (!workerLease.tryAcquire()) { releaseWorkSlot(); return } }
   catch (error) {
+    releaseWorkSlot()
     log('error', 'scan_lease_claim_failed', { error: errorMessage(error) })
     return
   }
   active = runScan(scan.id).catch((error) => {
     log('error', 'scan_worker_failed', { scanId: scan.id, error: errorMessage(error) })
-  }).finally(() => { active = undefined })
+  }).finally(() => { active = undefined; releaseWorkSlot() })
   return active
 }
 
@@ -46,12 +49,12 @@ async function runScan(scanId: number) {
   if (!scan) return
   let client: ReturnType<typeof createR2Client> | undefined
   try {
-    const config = r2Config()
+    const config = r2Config(scan.bucketId)
     client = createR2Client(config)
     workerLease.assertOwned()
     if (scan.status === 'running' && !scan.cursor) db.delete(objects).where(eq(objects.scanId, scanId)).run()
     db.update(scans).set({ status: 'running', startedAt: scan.startedAt ?? new Date().toISOString(), error: null }).where(eq(scans.id, scanId)).run()
-    log('info', 'scan_started', { scanId, prefix: scan.prefix })
+    log('info', 'scan_started', { scanId, bucketId: scan.bucketId, prefix: scan.prefix })
     let cursor = scan.cursor ?? undefined
     do {
       if (stopping) return
@@ -79,12 +82,12 @@ async function runScan(scanId: number) {
         }
         workerLease.assertOwned()
         db.insert(objects).values({
-          key: item.Key, scanId, etag: item.ETag ?? null, size: item.Size ?? 0,
+          bucketId: scan.bucketId, key: item.Key, scanId, etag: item.ETag ?? null, size: item.Size ?? 0,
           lastModified: item.LastModified?.toISOString() ?? null,
           isJpeg: jpeg, isOptimized: optimized, metadataStatus, metadataError,
           optimizerVersion, discoveredAt: new Date().toISOString(),
         }).onConflictDoUpdate({
-          target: objects.key,
+          target: [objects.bucketId, objects.key],
           set: {
             scanId, etag: item.ETag ?? null, size: item.Size ?? 0,
             lastModified: item.LastModified?.toISOString() ?? null,

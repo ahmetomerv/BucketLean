@@ -9,7 +9,7 @@ vi.mock('./r2', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./r2')>()
   return {
     ...actual,
-    r2Config: () => ({ endpoint: 'https://example.r2.cloudflarestorage.com', bucket: 'test', accessKeyId: 'x', secretAccessKey: 'x' }),
+    r2Config: () => ({ id: 'default', endpoint: 'https://example.r2.cloudflarestorage.com', bucket: 'test', accessKeyId: 'x', secretAccessKey: 'x' }),
     createR2Client: () => ({ send, destroy: vi.fn() }),
   }
 })
@@ -21,12 +21,14 @@ import { objects, scans } from './schema'
 import { workerLease } from './worker-lease'
 
 let dir: string
-const previous = { DATABASE_PATH: process.env.DATABASE_PATH, R2_ENDPOINT: process.env.R2_ENDPOINT, R2_BUCKET: process.env.R2_BUCKET }
+const previous = { DATABASE_PATH: process.env.DATABASE_PATH, R2_ENDPOINT: process.env.R2_ENDPOINT, R2_BUCKET: process.env.R2_BUCKET, R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY }
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'r2-optimizer-test-'))
   process.env.DATABASE_PATH = join(dir, 'test.sqlite')
   process.env.R2_ENDPOINT = 'https://example.r2.cloudflarestorage.com'
   process.env.R2_BUCKET = 'test'
+  process.env.R2_ACCESS_KEY_ID = 'x'
+  process.env.R2_SECRET_ACCESS_KEY = 'x'
 })
 afterAll(() => {
   workerLease.release()
@@ -85,9 +87,9 @@ test('resumes a saved continuation token without repeating completed pages', asy
     throw new Error('Unexpected command')
   })
   const db = getDatabase()
-  const scan = db.insert(scans).values({ prefix: 'other/', status: 'running', cursor: 'saved-page', createdAt: new Date().toISOString() }).returning().get()
+  const scan = db.insert(scans).values({ bucketId: 'default', prefix: 'other/', status: 'running', cursor: 'saved-page', createdAt: new Date().toISOString() }).returning().get()
   db.insert(objects).values({
-    scanId: scan.id, key: 'other/first.jpg', size: 1_000_000, isJpeg: true,
+    bucketId: 'default', scanId: scan.id, key: 'other/first.jpg', size: 1_000_000, isJpeg: true,
     isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString(),
   }).run()
   await runNextScan()
@@ -130,8 +132,8 @@ test('restarts an interrupted first page from the beginning without duplicate ro
     throw new Error('Unexpected command')
   })
   const db = getDatabase()
-  const scan = db.insert(scans).values({ prefix: 'restart/', status: 'running', createdAt: new Date().toISOString() }).returning().get()
-  db.insert(objects).values({ scanId: scan.id, key: 'restart/first.jpg', size: 100, etag: '"old"', isJpeg: true,
+  const scan = db.insert(scans).values({ bucketId: 'default', prefix: 'restart/', status: 'running', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({ bucketId: 'default', scanId: scan.id, key: 'restart/first.jpg', size: 100, etag: '"old"', isJpeg: true,
     isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
   await runNextScan()
   expect(db.select().from(scans).where(eq(scans.id, scan.id)).get()).toMatchObject({ status: 'completed', discoveredCount: 2, jpegCount: 2 })

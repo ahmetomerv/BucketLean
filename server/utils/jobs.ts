@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm'
 import {
-  HeadObjectCommand, PutObjectCommand,
+  DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand,
   type HeadObjectCommandOutput, type S3Client,
 } from '@aws-sdk/client-s3'
 import { getDatabase } from './db'
@@ -16,6 +16,7 @@ import { workerLease, WorkerLeaseLostError } from './worker-lease'
 import { classifyFailure, MAX_TRANSIENT_FAILURES, retryDelayMs, SourceChangedError } from './failures'
 import { ensureBackupManifest, headersFromHead, makeBackupManifest, manifestKeyForBackup } from './backup-manifest'
 import { downloadToTempFile, MAX_IMAGE_BYTES } from './download'
+import { claimWorkSlot, releaseWorkSlot } from './work-slot'
 
 const JOB_ITEM_BATCH_SIZE = 100
 type Client = Pick<S3Client, 'send'>
@@ -32,29 +33,34 @@ function isNotFound(error: unknown) {
     (('$metadata' in error && (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404) ||
       ('name' in error && (error as { name?: string }).name === 'NoSuchKey'))
 }
+function isMissingObject(error: unknown) {
+  return isNotFound(error) || !!error && typeof error === 'object' && '$metadata' in error &&
+    (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404
+}
 
-export function enqueueJob(input: { prefix: string, minBytes: number, preset: Preset, minimumSavingPercent: number, preserveMetadata: boolean, backupOriginals: boolean }) {
-  r2Config()
+export function enqueueJob(input: { bucketId?: string, prefix: string, minBytes: number, preset: Preset, minimumSavingPercent: number, preserveMetadata: boolean, backupOriginals: boolean, deleteBackupAfterOptimization?: boolean }) {
+  const config = r2Config(input.bucketId)
   if (!input.backupOriginals) throw new Error('Original backups are required for this MVP')
   const db = getDatabase()
-  const activeScan = db.select({ id: scans.id }).from(scans).where(inArray(scans.status, ['queued', 'running'])).get()
+  const activeScan = db.select({ id: scans.id }).from(scans).where(and(eq(scans.bucketId, config.id), inArray(scans.status, ['queued', 'running']))).get()
   if (activeScan) throw new Error('Wait for the current scan to finish')
   const activeJob = db.select({ id: optimizationJobs.id }).from(optimizationJobs)
-    .where(inArray(optimizationJobs.status, ['queued', 'running', 'paused', 'needs_attention'])).get()
+    .where(and(eq(optimizationJobs.bucketId, config.id), inArray(optimizationJobs.status, ['queued', 'running', 'paused', 'needs_attention']))).get()
   if (activeJob) throw new Error('Resolve the existing optimization job before creating another')
-  const scan = db.select().from(scans).where(eq(scans.status, 'completed')).orderBy(desc(scans.id)).get()
+  const scan = db.select().from(scans).where(and(eq(scans.bucketId, config.id), eq(scans.status, 'completed'))).orderBy(desc(scans.id)).get()
   if (!scan) throw new Error('Complete a scan before creating a job')
   const now = new Date().toISOString()
   const { job, count } = db.transaction((tx) => {
-    const conditions = and(eq(objects.scanId, scan.id), eq(objects.isJpeg, true), eq(objects.isOptimized, false),
+    const conditions = and(eq(objects.bucketId, config.id), eq(objects.scanId, scan.id), eq(objects.isJpeg, true), eq(objects.isOptimized, false),
       eq(objects.metadataStatus, 'known'), prefixCondition(input.prefix), sql`${objects.size} >= ${input.minBytes}`)
     const firstBatch = tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
       .where(conditions).orderBy(asc(objects.key)).limit(JOB_ITEM_BATCH_SIZE).all()
     if (!firstBatch.length) throw new Error('No eligible JPEGs match the filters')
     const created = tx.insert(optimizationJobs).values({
-      scanId: scan.id, prefix: input.prefix, minBytes: input.minBytes,
+      bucketId: config.id, scanId: scan.id, prefix: input.prefix, minBytes: input.minBytes,
       status: 'queued', preset: input.preset, minimumSavingPercent: input.minimumSavingPercent,
-      backupOriginals: true, preserveMetadata: input.preserveMetadata, createdAt: now,
+      backupOriginals: true, deleteBackupAfterOptimization: input.deleteBackupAfterOptimization ?? false,
+      preserveMetadata: input.preserveMetadata, createdAt: now,
     }).returning().get()
     let batch = firstBatch
     let count = 0
@@ -71,28 +77,29 @@ export function enqueueJob(input: { prefix: string, minBytes: number, preset: Pr
     }
     return { job: created, count }
   })
-  log('info', 'job_queued', { jobId: job.id, scanId: scan.id, candidates: count })
+  log('info', 'job_queued', { jobId: job.id, bucketId: config.id, scanId: scan.id, candidates: count })
   void runNextJob()
   return { job, count }
 }
 
 export function enqueueReconciliation(jobId: number) {
-  r2Config()
   const db = getDatabase()
   const job = db.transaction((tx) => {
     const current = tx.select().from(optimizationJobs).where(eq(optimizationJobs.id, jobId)).get()
     if (!current) throw new Error('Job not found')
+    r2Config(current.bucketId)
     if (current.status !== 'needs_attention') throw new Error('Job does not need reconciliation')
-    if (tx.select({ id: scans.id }).from(scans).where(inArray(scans.status, ['queued', 'running'])).get()) {
+    if (tx.select({ id: scans.id }).from(scans).where(and(eq(scans.bucketId, current.bucketId), inArray(scans.status, ['queued', 'running']))).get()) {
       throw new Error('Wait for the current scan to finish')
     }
     if (tx.select({ id: optimizationJobs.id }).from(optimizationJobs)
-      .where(inArray(optimizationJobs.status, ['queued', 'running'])).get()) {
+      .where(and(eq(optimizationJobs.bucketId, current.bucketId), inArray(optimizationJobs.status, ['queued', 'running']))).get()) {
       throw new Error('An optimization job is already active')
     }
-    const items = tx.update(optimizationItems).set({ status: 'uploading', error: null, finishedAt: null })
-      .where(and(eq(optimizationItems.jobId, jobId), eq(optimizationItems.status, 'needs_attention'))).returning({ id: optimizationItems.id }).all()
+    const items = tx.select().from(optimizationItems).where(and(eq(optimizationItems.jobId, jobId), eq(optimizationItems.status, 'needs_attention'))).all()
     if (!items.length) throw new Error('Job has no items needing reconciliation')
+    for (const item of items) tx.update(optimizationItems).set({ status: item.cleanupPendingAt ? 'cleanup_pending' : 'uploading', error: null, finishedAt: null })
+      .where(eq(optimizationItems.id, item.id)).run()
     tx.update(optimizationJobs).set({ status: 'queued', finishedAt: null }).where(eq(optimizationJobs.id, jobId)).run()
     return current
   })
@@ -102,13 +109,13 @@ export function enqueueReconciliation(jobId: number) {
 }
 
 export function resumeJob(jobId: number) {
-  r2Config()
   const db = getDatabase()
   db.transaction((tx) => {
     const job = tx.select().from(optimizationJobs).where(eq(optimizationJobs.id, jobId)).get()
     if (!job) throw new Error('Job not found')
+    r2Config(job.bucketId)
     if (job.status !== 'paused') throw new Error('Job is not paused')
-    if (tx.select({ id: scans.id }).from(scans).where(inArray(scans.status, ['queued', 'running'])).get()) {
+    if (tx.select({ id: scans.id }).from(scans).where(and(eq(scans.bucketId, job.bucketId), inArray(scans.status, ['queued', 'running']))).get()) {
       throw new Error('Wait for the current scan to finish')
     }
     tx.update(optimizationJobs).set({ status: 'queued', pauseReason: null })
@@ -139,7 +146,7 @@ export function getJobSummary(jobId: number) {
     calculatedFinalBytes: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'completed' then ${optimizationItems.optimizedSize} else ${optimizationItems.originalSize} end), 0)`,
   }).from(optimizationItems).where(eq(optimizationItems.jobId, jobId)).get()!
   const current = db.select({ key: optimizationItems.key, status: optimizationItems.status }).from(optimizationItems)
-    .where(and(eq(optimizationItems.jobId, jobId), inArray(optimizationItems.status, ['downloading', 'processing', 'uploading']))).orderBy(asc(optimizationItems.id)).get()
+    .where(and(eq(optimizationItems.jobId, jobId), inArray(optimizationItems.status, ['downloading', 'processing', 'uploading', 'cleanup_pending']))).orderBy(asc(optimizationItems.id)).get()
   const { unknownFinalCount, calculatedFinalBytes, ...publicCounts } = counts
   const finalBytes = unknownFinalCount ? null : calculatedFinalBytes
   const savedBytes = finalBytes === null ? null : counts.originalBytes - finalBytes
@@ -196,11 +203,85 @@ function markCompleted(job: Job, item: Item, optimizedSize: number, optimizedEta
   const db = getDatabase()
   const saving = Math.round(100 * (item.originalSize - optimizedSize) / item.originalSize)
   db.transaction((tx) => {
-    tx.update(optimizationItems).set({ status: 'completed', optimizedSize, savedPercent: saving, error: null, finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
+    tx.update(optimizationItems).set(job.deleteBackupAfterOptimization
+      ? { status: 'cleanup_pending', cleanupPendingAt: new Date().toISOString(), optimizedSize, savedPercent: saving, error: null }
+      : { status: 'completed', optimizedSize, savedPercent: saving, error: null, finishedAt: new Date().toISOString() })
+      .where(eq(optimizationItems.id, item.id)).run()
     tx.update(objects).set({ isOptimized: true, optimizerVersion: '1', size: optimizedSize, optimizedSize, savedPercent: saving,
-      etag: optimizedEtag, metadataStatus: 'known', metadataError: null }).where(eq(objects.key, item.key)).run()
+      etag: optimizedEtag, metadataStatus: 'known', metadataError: null })
+      .where(and(eq(objects.bucketId, job.bucketId), eq(objects.key, item.key))).run()
   })
-  log('info', 'item_completed', { jobId: job.id, itemId: item.id, key: item.key, originalSize: item.originalSize, optimizedSize })
+  if (!job.deleteBackupAfterOptimization) log('info', 'item_completed', { jobId: job.id, itemId: item.id, key: item.key, originalSize: item.originalSize, optimizedSize })
+}
+
+async function cleanupVerifiedBackup(client: Client, bucket: string, job: Job, item: Item) {
+  if (!item.cleanupPendingAt || !item.backupKey || !item.manifestKey || !item.originalSha256 || !item.optimizedSha256) {
+    throw new Error('Persisted backup cleanup intent is incomplete')
+  }
+  workerLease.assertOwned()
+  const sourceHead = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.key }))
+  const ownUpload = sourceHead.Metadata?.['image-optimizer-version'] === '1' &&
+    sourceHead.Metadata?.['image-optimizer-job-id'] === String(job.id) &&
+    sourceHead.Metadata?.['image-optimizer-item-id'] === String(item.id)
+  if (!ownUpload) throw new SourceChangedError('Optimized source no longer has this job and item identity; backup was retained if present')
+  const source = await downloadToTempFile(client, bucket, item.key, sourceHead.ETag)
+  try {
+    if (source.sha256 !== item.optimizedSha256 || source.size !== item.optimizedSize) {
+      throw new SourceChangedError('Optimized source hash differs; backup was retained if present')
+    }
+  } finally { await source.dispose() }
+  workerLease.assertOwned()
+
+  let backupExists = false
+  try {
+    const backup = await downloadToTempFile(client, bucket, item.backupKey)
+    try {
+      if (backup.sha256 !== item.originalSha256 || backup.size !== item.originalSize) {
+        throw new Error('Backup differs from the verified original; cleanup stopped')
+      }
+      backupExists = true
+    } finally { await backup.dispose() }
+  } catch (error) { if (!isMissingObject(error)) throw error }
+
+  let manifestExists = false
+  try {
+    const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: item.manifestKey }))
+    if (!result.Body || (result.ContentLength != null && result.ContentLength > 1024 * 1024)) throw new Error('Cleanup manifest is unreadable or too large')
+    const bytes = Buffer.from(await result.Body.transformToByteArray())
+    if (bytes.length > 1024 * 1024) throw new Error('Cleanup manifest is too large')
+    const manifest = JSON.parse(bytes.toString('utf8')) as { bucket?: string, jobId?: number, itemId?: number,
+      backupKey?: string, sha256?: string }
+    if (manifest.bucket !== bucket || manifest.jobId !== job.id || manifest.itemId !== item.id ||
+      manifest.backupKey !== item.backupKey || manifest.sha256 !== item.originalSha256) {
+      throw new Error('Cleanup manifest differs from the verified original')
+    }
+    manifestExists = true
+  } catch (error) { if (!isMissingObject(error)) throw error }
+  if (backupExists && !manifestExists) throw new Error('Backup manifest is missing; cleanup stopped')
+
+  if (backupExists) {
+    workerLease.assertOwned()
+    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: item.backupKey }))
+    try {
+      await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.backupKey }))
+      throw new Error('Backup still exists after cleanup delete')
+    } catch (error) { if (!isMissingObject(error)) throw error }
+  }
+  workerLease.assertOwned()
+  getDatabase().update(optimizationItems).set({ backupDeletedAt: new Date().toISOString() })
+    .where(eq(optimizationItems.id, item.id)).run()
+  if (manifestExists) {
+    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: item.manifestKey }))
+    try {
+      await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.manifestKey }))
+      throw new Error('Manifest still exists after cleanup delete')
+    } catch (error) { if (!isMissingObject(error)) throw error }
+  }
+  workerLease.assertOwned()
+  getDatabase().update(optimizationItems).set({ status: 'completed', manifestDeletedAt: new Date().toISOString(),
+    error: null, finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
+  log('info', 'item_completed', { jobId: job.id, itemId: item.id, key: item.key,
+    originalSize: item.originalSize, optimizedSize: item.optimizedSize, backupDeleted: true })
 }
 
 async function reconcileRemoteState(client: Client, bucket: string, job: Job, item: Item, head: HeadObjectCommandOutput) {
@@ -241,6 +322,10 @@ async function reconcileRemoteState(client: Client, bucket: string, job: Job, it
     const backupHead = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.backupKey }))
     await verifyManifest(client, bucket, job, item, item.backupKey, item.originalSha256, item.originalSize, backupHead)
     markCompleted(job, item, sourceSize, head.ETag ?? null)
+    if (job.deleteBackupAfterOptimization) {
+      const latest = getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()!
+      await cleanupVerifiedBackup(client, bucket, job, latest)
+    }
     return 'completed' as const
   }
   if (sourceHash === item.originalSha256 && etag(head.ETag) === etag(item.etag) &&
@@ -255,6 +340,10 @@ async function reconcileRemoteState(client: Client, bucket: string, job: Job, it
 async function processItem(client: Client, bucket: string, job: Job, item: Item) {
   const db = getDatabase()
   workerLease.assertOwned()
+  if (item.status === 'cleanup_pending' || item.cleanupPendingAt) {
+    await cleanupVerifiedBackup(client, bucket, job, item)
+    return
+  }
   const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.key }))
   workerLease.assertOwned()
   if (item.status === 'uploading' || item.backupKey || item.replacementAttemptedAt) {
@@ -338,21 +427,25 @@ let active: Promise<void> | undefined
 export function runNextJob() {
   if (stopping || active) return active
   const db = getDatabase()
-  const job = db.select().from(optimizationJobs).where(inArray(optimizationJobs.status, ['queued', 'running'])).orderBy(asc(optimizationJobs.id)).get()
+  const job = db.select().from(optimizationJobs).where(inArray(optimizationJobs.status, ['queued', 'running']))
+    .orderBy(asc(optimizationJobs.id)).all().find(candidate => {
+      const unfinished = db.select({ id: optimizationItems.id }).from(optimizationItems)
+        .where(and(eq(optimizationItems.jobId, candidate.id), inArray(optimizationItems.status,
+          ['pending', 'downloading', 'processing', 'uploading', 'cleanup_pending', 'retry_wait']))).get()
+      const runnable = db.select({ id: optimizationItems.id }).from(optimizationItems).where(and(eq(optimizationItems.jobId, candidate.id),
+        sql`(${optimizationItems.status} in ('pending', 'downloading', 'processing', 'uploading', 'cleanup_pending') or
+          (${optimizationItems.status} = 'retry_wait' and (${optimizationItems.nextAttemptAt} is null or ${optimizationItems.nextAttemptAt} <= ${Date.now()})))`)).get()
+      return !unfinished || !!runnable
+    })
   if (!job) return
-  const unfinished = db.select({ id: optimizationItems.id }).from(optimizationItems)
-    .where(and(eq(optimizationItems.jobId, job.id), inArray(optimizationItems.status,
-      ['pending', 'downloading', 'processing', 'uploading', 'retry_wait']))).get()
-  const runnable = db.select({ id: optimizationItems.id }).from(optimizationItems).where(and(eq(optimizationItems.jobId, job.id),
-    sql`(${optimizationItems.status} in ('pending', 'downloading', 'processing', 'uploading') or
-      (${optimizationItems.status} = 'retry_wait' and (${optimizationItems.nextAttemptAt} is null or ${optimizationItems.nextAttemptAt} <= ${Date.now()})))`)).get()
-  if (unfinished && !runnable) return
-  try { if (!workerLease.tryAcquire()) return }
+  if (!claimWorkSlot()) return
+  try { if (!workerLease.tryAcquire()) { releaseWorkSlot(); return } }
   catch (error) {
+    releaseWorkSlot()
     log('error', 'job_lease_claim_failed', { error: errorMessage(error) })
     return
   }
-  active = runJob(job).catch(error => log('error', 'job_worker_failed', { jobId: job.id, error: errorMessage(error) })).finally(() => { active = undefined })
+  active = runJob(job).catch(error => log('error', 'job_worker_failed', { jobId: job.id, error: errorMessage(error) })).finally(() => { active = undefined; releaseWorkSlot() })
   return active
 }
 
@@ -360,7 +453,7 @@ async function runJob(job: Job) {
   const db = getDatabase()
   let client: ReturnType<typeof createR2Client> | undefined
   try {
-    const config = r2Config()
+    const config = r2Config(job.bucketId)
     client = createR2Client(config)
     workerLease.assertOwned()
     db.update(optimizationJobs).set({ status: 'running', startedAt: job.startedAt ?? new Date().toISOString() }).where(eq(optimizationJobs.id, job.id)).run()
@@ -369,7 +462,7 @@ async function runJob(job: Job) {
     while (!stopping) {
       workerLease.assertOwned()
       const item = db.select().from(optimizationItems).where(and(eq(optimizationItems.jobId, job.id),
-        sql`(${optimizationItems.status} in ('pending', 'downloading', 'processing', 'uploading') or
+        sql`(${optimizationItems.status} in ('pending', 'downloading', 'processing', 'uploading', 'cleanup_pending') or
           (${optimizationItems.status} = 'retry_wait' and (${optimizationItems.nextAttemptAt} is null or ${optimizationItems.nextAttemptAt} <= ${Date.now()})))`))
         .orderBy(asc(optimizationItems.id)).get()
       if (!item) break
@@ -382,7 +475,8 @@ async function runJob(job: Job) {
         const message = errorMessage(error)
         const kind = classifyFailure(error)
         const latest = db.select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()!
-        const uncertain = latest.status === 'uploading' || !!latest.backupKey || !!latest.replacementAttemptedAt
+        const uncertain = latest.status === 'uploading' || latest.status === 'cleanup_pending' ||
+          !!latest.backupKey || !!latest.replacementAttemptedAt || !!latest.cleanupPendingAt
         if (kind === 'credentials' || kind === 'bucket') {
           db.transaction((tx) => {
             tx.update(optimizationItems).set({ status: latest.status === 'retry_wait' ? (uncertain ? 'uploading' : 'pending') : latest.status,
@@ -421,7 +515,7 @@ async function runJob(job: Job) {
       workerLease.assertOwned()
       const unfinished = db.select({ id: optimizationItems.id }).from(optimizationItems)
         .where(and(eq(optimizationItems.jobId, job.id), inArray(optimizationItems.status,
-          ['pending', 'downloading', 'processing', 'uploading', 'retry_wait']))).get()
+              ['pending', 'downloading', 'processing', 'uploading', 'cleanup_pending', 'retry_wait']))).get()
       if (unfinished) return
       const needsAttention = db.select({ id: optimizationItems.id }).from(optimizationItems)
         .where(and(eq(optimizationItems.jobId, job.id), eq(optimizationItems.status, 'needs_attention'))).get()

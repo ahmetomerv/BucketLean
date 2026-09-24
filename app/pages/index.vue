@@ -1,4 +1,7 @@
 <script setup lang="ts">
+type BucketInfo = { id: string, endpoint: string, bucket: string }
+const { data: bucketResult } = await useFetch<{ buckets: BucketInfo[] }>('/api/buckets', { default: () => ({ buckets: [] }) })
+const bucketId = ref(bucketResult.value.buckets[0]?.id ?? '')
 const prefix = ref('')
 const minMiB = ref(1)
 const status = ref('all')
@@ -10,16 +13,21 @@ const preset = ref<'archival' | 'balanced' | 'aggressive'>('balanced')
 const minimumSavingPercent = ref(15)
 const preserveMetadata = ref(true)
 const backupOriginals = ref(true)
+const deleteBackupAfterOptimization = ref(false)
 const acknowledged = ref(false)
 
-const filters = computed(() => ({ prefix: prefix.value, minBytes: Math.max(0, Math.floor((Number(minMiB.value) || 0) * 1048576)), status: status.value, page: page.value }))
+const filters = computed(() => ({ bucketId: bucketId.value, prefix: prefix.value, minBytes: Math.max(0, Math.floor((Number(minMiB.value) || 0) * 1048576)), status: status.value, page: page.value }))
 const { data: overview, refresh: refreshOverview } = await useFetch('/api/overview', { query: filters, default: () => ({ scan: null, totals: { objects: 0, jpegs: 0, jpegBytes: 0, optimized: 0, eligible: 0, metadataUnknown: 0 } }) })
 const { data: result, refresh: refreshObjects } = await useFetch('/api/objects', { query: filters, default: () => ({ items: [], total: 0, page: 1, pageSize: 100 }) })
-const { data: jobsResult, refresh: refreshJobs } = await useFetch('/api/jobs', { default: () => ({ jobs: [] }) })
+const { data: jobsResult, refresh: refreshJobs } = await useFetch('/api/jobs', { query: computed(() => ({ bucketId: bucketId.value })), default: () => ({ jobs: [] }) })
 
 watch([prefix, minMiB, status], () => { page.value = 1 })
-const scanning = computed(() => ['queued', 'running'].includes(overview.value.scan?.status ?? ''))
-const currentJob = computed(() => jobsResult.value.jobs.find(job => ['needs_attention', 'paused'].includes(job?.job.status ?? '')) ?? jobsResult.value.jobs[0] ?? null)
+watch(bucketId, () => { prefix.value = ''; scanPrefix.value = ''; page.value = 1; acknowledged.value = false; actionError.value = '' })
+const scanning = computed(() => overview.value.scan?.bucketId === bucketId.value && ['queued', 'running'].includes(overview.value.scan.status))
+const currentJob = computed(() => {
+  const jobs = jobsResult.value.jobs.filter(job => job && job.job.bucketId === bucketId.value)
+  return jobs.find(job => job && ['needs_attention', 'paused'].includes(job.job.status)) ?? jobs[0] ?? null
+})
 const jobActive = computed(() => ['queued', 'running', 'paused', 'needs_attention'].includes(currentJob.value?.job.status ?? ''))
 const maxPage = computed(() => Math.max(1, Math.ceil(result.value.total / result.value.pageSize)))
 const number = new Intl.NumberFormat()
@@ -34,7 +42,7 @@ async function startScan() {
   busy.value = true
   actionError.value = ''
   try {
-    await $fetch('/api/scan', { method: 'POST', body: { prefix: scanPrefix.value } })
+    await $fetch('/api/scan', { method: 'POST', body: { bucketId: bucketId.value, prefix: scanPrefix.value } })
     await Promise.all([refreshOverview(), refreshObjects()])
   } catch (error: unknown) {
     actionError.value = error && typeof error === 'object' && 'data' in error
@@ -48,9 +56,9 @@ async function startJob() {
   actionError.value = ''
   try {
     await $fetch('/api/jobs', { method: 'POST', body: {
-      prefix: prefix.value, minBytes: filters.value.minBytes, preset: preset.value,
+      bucketId: bucketId.value, prefix: prefix.value, minBytes: filters.value.minBytes, preset: preset.value,
       minimumSavingPercent: minimumSavingPercent.value, preserveMetadata: preserveMetadata.value,
-      backupOriginals: backupOriginals.value,
+      backupOriginals: backupOriginals.value, deleteBackupAfterOptimization: deleteBackupAfterOptimization.value,
     } })
     acknowledged.value = false
     await refreshJobs()
@@ -108,21 +116,31 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
     </header>
 
     <section class="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <label class="block max-w-xl text-sm font-medium text-slate-700">R2 bucket
+        <select v-model="bucketId" :disabled="busy || !bucketResult.buckets.length" class="mt-2 block w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-600">
+          <option v-for="bucket in bucketResult.buckets" :key="bucket.id" :value="bucket.id">{{ bucket.bucket }} · {{ bucket.id }}</option>
+        </select>
+      </label>
+      <p v-if="!bucketResult.buckets.length" class="mt-2 text-sm text-amber-700">Configure an R2 bucket on the server before scanning.</p>
+      <p v-else class="mt-2 text-xs text-slate-500">Each bucket keeps separate scan results and jobs. The worker processes one operation at a time across the service.</p>
+    </section>
+
+    <section class="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-end">
         <label class="flex-1 text-sm font-medium text-slate-700">Scan prefix
-          <input v-model="scanPrefix" :disabled="scanning || jobActive" type="text" placeholder="Leave empty for entire bucket" class="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-600">
+          <input v-model="scanPrefix" :disabled="!bucketId || scanning || jobActive" type="text" placeholder="Leave empty for entire bucket" class="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-600">
         </label>
-        <button :disabled="scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan">{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
+        <button :disabled="!bucketId || scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan">{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
       </div>
       <p v-if="actionError" class="mt-3 text-sm text-red-700">{{ actionError }}</p>
-      <div v-if="overview.scan" class="mt-4 flex flex-wrap gap-x-6 gap-y-1 border-t border-slate-100 pt-4 text-sm text-slate-600">
+      <div v-if="overview.scan?.bucketId === bucketId" class="mt-4 flex flex-wrap gap-x-6 gap-y-1 border-t border-slate-100 pt-4 text-sm text-slate-600">
         <span>Status: <strong class="capitalize text-slate-900">{{ overview.scan.status }}</strong></span>
         <span>Scope: <strong class="text-slate-900">{{ overview.scan.prefix || 'Entire bucket' }}</strong></span>
         <span>Started: {{ formatDate(overview.scan.startedAt) }}</span>
         <span v-if="scanning">Discovered: {{ number.format(overview.scan.discoveredCount) }}</span>
         <span v-if="overview.scan.metadataErrorCount" class="text-amber-700">{{ number.format(overview.scan.metadataErrorCount) }} metadata checks failed</span>
       </div>
-      <p v-if="overview.scan?.error" class="mt-3 text-sm text-red-700">{{ overview.scan.error }}</p>
+      <p v-if="overview.scan?.bucketId === bucketId && overview.scan.error" class="mt-3 text-sm text-red-700">{{ overview.scan.error }}</p>
     </section>
 
     <section class="mb-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -133,9 +151,10 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         <label class="flex items-center gap-2 self-end pb-2 text-sm text-slate-700"><input v-model="preserveMetadata" :disabled="jobActive" type="checkbox"> Preserve photo metadata</label>
         <label class="flex items-center gap-2 self-end pb-2 text-sm text-slate-700"><input v-model="backupOriginals" type="checkbox" disabled> Back up originals (required)</label>
       </div>
+      <label class="mt-4 flex items-start gap-2 text-sm text-slate-700"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="mt-1"> Delete each original backup after the optimized image is verified. This frees storage but removes the restore copy.</label>
       <div class="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
         <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="acknowledged" :disabled="jobActive" type="checkbox"> I understand qualifying originals will be replaced after backup.</label>
-        <button :disabled="!acknowledged || !backupOriginals || !overview.scan || overview.scan.status !== 'completed' || !overview.totals.eligible || scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(overview.totals.eligible)} JPEGs` }}</button>
+        <button :disabled="!bucketId || !acknowledged || !backupOriginals || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !overview.totals.eligible || scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(overview.totals.eligible)} JPEGs` }}</button>
       </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
       <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">

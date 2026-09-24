@@ -1,10 +1,10 @@
 # Getting started
 
-R2 JPEG Optimizer runs as a private Node server connected to one R2 bucket. Its [documentation site](../index.md) is a separate static build; hosting the docs does not run the optimizer.
+R2 JPEG Optimizer runs as a private Node server connected to one or more R2 buckets. Its [documentation site](../index.md) is a separate static build; hosting the docs does not run the optimizer.
 
 ## Run the application locally
 
-Requirements: Node.js 22 or newer, npm, and an R2 bucket. Create a bucket-scoped token with Object Read & Write access if you intend to optimize; a read-only token is enough for scanning.
+Requirements: Node.js 22 or newer, npm, and at least one R2 bucket. Use a token with Object Read & Write access to each bucket you intend to optimize; a read-only token is enough for scanning.
 
 ```sh
 cp .env.example .env
@@ -12,7 +12,7 @@ npm ci
 npm run dev
 ```
 
-Set `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `APP_PASSWORD` in `.env`. The local database defaults to `.data/optimizer.sqlite`; set `DATABASE_PATH` to use another location. Open `http://localhost:3000` and sign in with any username and the configured app password. Keep the R2 credentials on the server and use HTTPS when deploying the app.
+Set `APP_PASSWORD` and either the four single-bucket `R2_*` variables or `R2_BUCKETS_JSON` in `.env`. For JSON, provide one `id`, `endpoint`, `bucket`, `accessKeyId`, and `secretAccessKey` per bucket. Account-wide credentials can be repeated across entries; a bucket-scoped token can be used for its one entry. For example: `R2_BUCKETS_JSON='[{"id":"photos","endpoint":"https://ACCOUNT_ID.r2.cloudflarestorage.com","bucket":"photos","accessKeyId":"KEY","secretAccessKey":"SECRET"}]'`. The local database defaults to `.data/optimizer.sqlite`; set `DATABASE_PATH` to use another location. Open `http://localhost:3000` and sign in with any username and the configured app password. Keep the R2 credentials on the server and use HTTPS when deploying the app.
 
 ## Ways to use the running app
 
@@ -26,9 +26,9 @@ The static documentation site is a separate build and does not run scans or jobs
 
 ## First safe run
 
-1. Scan a narrow prefix containing one or two known JPEGs. Scanning reads R2 but does not change objects.
+1. Select a bucket, then scan a narrow prefix containing one or two known JPEGs. Scanning reads R2 but does not change objects.
 2. Inspect the eligible count and object list. Files with unknown metadata or an existing `image-optimizer-version` marker are excluded.
-3. Create a job for that same prefix. Balanced quality 82 and a minimum 15% saving are the defaults. The original backup is mandatory.
+3. Create a job for that same prefix. Balanced quality 82 and a minimum 15% saving are the defaults. A verified original backup is mandatory before replacement. The optional deletion checkbox is off by default; selecting it removes the backup and manifest only after the optimized source is verified, so you lose that image's restore copy.
 4. Watch the job result. The worker processes one image at a time and verifies its backup and manifest before conditionally replacing the source.
 
 The same workflow is available through the [HTTP API](../api/index.md). Creating a job starts processing asynchronously and may replace qualifying originals, so inspect the scan first.
