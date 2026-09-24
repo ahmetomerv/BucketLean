@@ -10,6 +10,7 @@ import { errorMessage, log } from './log'
 import { createR2Client, r2Config } from './r2'
 import { objects, optimizationItems, optimizationJobs, scans } from './schema'
 import { prefixCondition } from './query'
+import { workerLease, WorkerLeaseLostError } from './worker-lease'
 
 const MAX_IMAGE_BYTES = 128 * 1024 * 1024
 type Client = Pick<S3Client, 'send'>
@@ -95,6 +96,7 @@ function contentHeaders(head: HeadObjectCommandOutput) {
 }
 
 async function ensureBackup(client: Client, bucket: string, key: string, original: Buffer, head: HeadObjectCommandOutput) {
+  workerLease.assertOwned()
   try {
     await client.send(new PutObjectCommand({
       Bucket: bucket, Key: key, Body: original, ContentLength: original.length,
@@ -104,10 +106,12 @@ async function ensureBackup(client: Client, bucket: string, key: string, origina
     if (!isPreconditionFailure(error)) throw error
   }
   const backup = await readObject(client, bucket, key)
+  workerLease.assertOwned()
   if (backup.bytes.length !== original.length || digest(backup.bytes) !== digest(original)) throw new Error('Backup verification failed')
 }
 
 function markCompleted(job: Job, item: Item, optimizedSize: number, optimizedEtag: string | null) {
+  workerLease.assertOwned()
   const db = getDatabase()
   const saving = Math.round(100 * (item.originalSize - optimizedSize) / item.originalSize)
   db.transaction((tx) => {
@@ -120,6 +124,7 @@ function markCompleted(job: Job, item: Item, optimizedSize: number, optimizedEta
 
 async function reconcileOwnUpload(client: Client, bucket: string, job: Job, item: Item, head: HeadObjectCommandOutput) {
   if (head.Metadata?.['image-optimizer-job-id'] !== String(job.id) || head.Metadata?.['image-optimizer-item-id'] !== String(item.id) || !item.optimizedSha256) return false
+  workerLease.assertOwned()
   const current = await readObject(client, bucket, item.key, head.ETag)
   if (digest(current.bytes) !== item.optimizedSha256) throw new Error('Uploaded object hash differs from the validated output; inspect backup before retrying')
   markCompleted(job, item, current.bytes.length, head.ETag ?? null)
@@ -128,7 +133,9 @@ async function reconcileOwnUpload(client: Client, bucket: string, job: Job, item
 
 async function processItem(client: Client, bucket: string, job: Job, item: Item) {
   const db = getDatabase()
+  workerLease.assertOwned()
   const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.key }))
+  workerLease.assertOwned()
   if (await reconcileOwnUpload(client, bucket, job, item, head)) return
   if (head.Metadata?.['image-optimizer-version']) {
     db.update(optimizationItems).set({ status: 'skipped', error: 'Already optimized by another job', finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
@@ -144,9 +151,11 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
   }
   db.update(optimizationItems).set({ status: 'downloading', startedAt: item.startedAt ?? new Date().toISOString(), error: null }).where(eq(optimizationItems.id, item.id)).run()
   const downloaded = await readObject(client, bucket, item.key, item.etag)
+  workerLease.assertOwned()
   if (etag(downloaded.etag) !== etag(item.etag) || downloaded.bytes.length !== item.originalSize) throw new Error('Original changed during download')
   db.update(optimizationItems).set({ status: 'processing' }).where(eq(optimizationItems.id, item.id)).run()
   const { output } = await optimizeImage(downloaded.bytes, job.preset as Preset, job.preserveMetadata)
+  workerLease.assertOwned()
   const savedPercent = Math.round(100 * (downloaded.bytes.length - output.length) / downloaded.bytes.length)
   if (output.length > downloaded.bytes.length * (1 - job.minimumSavingPercent / 100)) {
     db.update(optimizationItems).set({ status: 'skipped', optimizedSize: output.length, savedPercent,
@@ -159,6 +168,7 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
   db.update(optimizationItems).set({ status: 'uploading', backupKey, originalSha256: digest(downloaded.bytes), optimizedSha256,
     optimizedSize: output.length, savedPercent }).where(eq(optimizationItems.id, item.id)).run()
   await ensureBackup(client, bucket, backupKey, downloaded.bytes, head)
+  workerLease.assertOwned()
   const metadata = {
     ...head.Metadata,
     'image-optimizer-version': '1',
@@ -173,11 +183,13 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
       IfMatch: item.etag, Metadata: metadata, ...contentHeaders(head) }))
   } catch (error) {
     // A timed-out PUT can still have succeeded. Reconcile before recording failure.
+    workerLease.assertOwned()
     const current = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.key }))
     if (await reconcileOwnUpload(client, bucket, job, { ...item, optimizedSha256 }, current)) return
     if (isPreconditionFailure(error)) throw new Error('Object changed before replacement; verified backup was retained')
     throw error
   }
+  workerLease.assertOwned()
   const verified = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: item.key }))
   if (verified.Metadata?.['image-optimizer-job-id'] !== String(job.id) || verified.Metadata?.['image-optimizer-item-id'] !== String(item.id)) throw new Error('Replacement metadata verification failed; inspect backup')
   const current = await readObject(client, bucket, item.key, verified.ETag)
@@ -193,6 +205,11 @@ export function runNextJob() {
   const db = getDatabase()
   const job = db.select().from(optimizationJobs).where(inArray(optimizationJobs.status, ['queued', 'running'])).orderBy(asc(optimizationJobs.id)).get()
   if (!job) return
+  try { if (!workerLease.tryAcquire()) return }
+  catch (error) {
+    log('error', 'job_lease_claim_failed', { error: errorMessage(error) })
+    return
+  }
   active = runJob(job).catch(error => log('error', 'job_worker_failed', { jobId: job.id, error: errorMessage(error) })).finally(() => { active = undefined })
   return active
 }
@@ -202,20 +219,25 @@ async function runJob(job: Job) {
   const config = r2Config()
   const client = createR2Client(config)
   try {
+    workerLease.assertOwned()
     db.update(optimizationJobs).set({ status: 'running', startedAt: job.startedAt ?? new Date().toISOString() }).where(eq(optimizationJobs.id, job.id)).run()
     log('info', 'job_started', { jobId: job.id })
     while (!stopping) {
+      workerLease.assertOwned()
       const item = db.select().from(optimizationItems).where(and(eq(optimizationItems.jobId, job.id),
         inArray(optimizationItems.status, ['pending', 'downloading', 'processing', 'uploading']))).orderBy(asc(optimizationItems.id)).get()
       if (!item) break
       try { await processItem(client, config.bucket, job, item) }
       catch (error) {
+        if (error instanceof WorkerLeaseLostError) throw error
+        workerLease.assertOwned()
         const message = errorMessage(error)
         db.update(optimizationItems).set({ status: 'failed', error: message, finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
         log('error', 'item_failed', { jobId: job.id, itemId: item.id, key: item.key, error: message })
       }
     }
     if (!stopping) {
+      workerLease.assertOwned()
       db.update(optimizationJobs).set({ status: 'completed', finishedAt: new Date().toISOString() }).where(eq(optimizationJobs.id, job.id)).run()
       log('info', 'job_completed', { jobId: job.id })
     }

@@ -15,16 +15,28 @@ vi.mock('./r2', async (importOriginal) => {
 })
 
 import { HeadObjectCommand, ListObjectsV2Command } from './r2'
-import { closeDatabase, getDatabase } from './db'
+import { closeDatabase, getDatabase, getDatabaseConnection } from './db'
 import { enqueueScan, isJpegKey, runNextScan } from './scanner'
 import { objects, scans } from './schema'
+import { workerLease } from './worker-lease'
 
 let dir: string
+const previous = { DATABASE_PATH: process.env.DATABASE_PATH, R2_ENDPOINT: process.env.R2_ENDPOINT, R2_BUCKET: process.env.R2_BUCKET }
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'r2-optimizer-test-'))
   process.env.DATABASE_PATH = join(dir, 'test.sqlite')
+  process.env.R2_ENDPOINT = 'https://example.r2.cloudflarestorage.com'
+  process.env.R2_BUCKET = 'test'
 })
-afterAll(() => { closeDatabase(); rmSync(dir, { recursive: true, force: true }); delete process.env.DATABASE_PATH })
+afterAll(() => {
+  workerLease.release()
+  closeDatabase()
+  rmSync(dir, { recursive: true, force: true })
+  for (const [name, value] of Object.entries(previous)) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+})
 
 test('persists paginated JPEG discovery and treats metadata errors as unknown', async () => {
   send.mockImplementation(async (command: unknown) => {
@@ -126,4 +138,49 @@ test('restarts an interrupted first page from the beginning without duplicate ro
   const rows = db.select().from(objects).where(eq(objects.scanId, scan.id)).all()
   expect(rows).toHaveLength(2)
   expect(rows.find(row => row.key === 'restart/first.jpg')).toMatchObject({ size: 200, etag: '"current"' })
+})
+
+test('leaves a queued scan untouched while another process owns the worker lease', async () => {
+  workerLease.release()
+  const db = getDatabase()
+  const connection = getDatabaseConnection()
+  connection.prepare("INSERT INTO worker_lease (name, owner, expires_at) VALUES ('worker', 'other-process', ?)").run(Date.now() + 60_000)
+  send.mockClear()
+  const { scan } = enqueueScan('guarded/')
+  expect(db.select().from(scans).where(eq(scans.id, scan.id)).get()?.status).toBe('queued')
+  expect(send).not.toHaveBeenCalled()
+  connection.prepare("DELETE FROM worker_lease WHERE name = 'worker'").run()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof ListObjectsV2Command) return { Contents: [], IsTruncated: false }
+    throw new Error('Unexpected command')
+  })
+  await runNextScan()
+  expect(db.select().from(scans).where(eq(scans.id, scan.id)).get()?.status).toBe('completed')
+})
+
+test('does not commit a scanned object after losing its lease and can restart the page', async () => {
+  let firstHead = true
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof ListObjectsV2Command) return {
+      Contents: [{ Key: 'lease-lost/photo.jpg', Size: 100, ETag: '"old"' }], IsTruncated: false,
+    }
+    if (command instanceof HeadObjectCommand) {
+      if (firstHead) {
+        firstHead = false
+        getDatabaseConnection().prepare("UPDATE worker_lease SET owner = 'takeover', expires_at = ? WHERE name = 'worker'")
+          .run(Date.now() + 60_000)
+      }
+      return { Metadata: {} }
+    }
+    throw new Error('Unexpected command')
+  })
+  const { scan } = enqueueScan('lease-lost/')
+  await runNextScan()
+  const db = getDatabase()
+  expect(db.select().from(scans).where(eq(scans.id, scan.id)).get()?.status).toBe('running')
+  expect(db.select().from(objects).where(eq(objects.scanId, scan.id)).all()).toHaveLength(0)
+  getDatabaseConnection().prepare("DELETE FROM worker_lease WHERE name = 'worker'").run()
+  await runNextScan()
+  expect(db.select().from(scans).where(eq(scans.id, scan.id)).get()).toMatchObject({ status: 'completed', discoveredCount: 1 })
 })

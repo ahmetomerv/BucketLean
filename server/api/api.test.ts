@@ -11,11 +11,15 @@ let dir: string
 let request: ReturnType<typeof toWebHandler>
 const originalPassword = process.env.APP_PASSWORD
 const originalDatabasePath = process.env.DATABASE_PATH
+const originalEndpoint = process.env.R2_ENDPOINT
+const originalBucket = process.env.R2_BUCKET
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'r2-api-test-'))
   process.env.DATABASE_PATH = join(dir, 'test.sqlite')
   process.env.APP_PASSWORD = 'test:password'
+  process.env.R2_ENDPOINT = 'https://example.r2.cloudflarestorage.com'
+  process.env.R2_BUCKET = 'test'
   // Nitro provides these H3 imports to route files at build time.
   for (const [name, value] of Object.entries({ createError, defineEventHandler, getHeader, getQuery,
     getRouterParam, readBody, setHeader, setResponseStatus })) vi.stubGlobal(name, value)
@@ -44,6 +48,10 @@ afterAll(() => {
   else process.env.DATABASE_PATH = originalDatabasePath
   if (originalPassword === undefined) delete process.env.APP_PASSWORD
   else process.env.APP_PASSWORD = originalPassword
+  if (originalEndpoint === undefined) delete process.env.R2_ENDPOINT
+  else process.env.R2_ENDPOINT = originalEndpoint
+  if (originalBucket === undefined) delete process.env.R2_BUCKET
+  else process.env.R2_BUCKET = originalBucket
   vi.unstubAllGlobals()
 })
 

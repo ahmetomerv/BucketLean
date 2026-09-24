@@ -7,14 +7,51 @@ import * as schema from './schema'
 let connection: Database.Database | undefined
 let orm: ReturnType<typeof drizzle<typeof schema>> | undefined
 
+function configuredBucketIdentity() {
+  const endpoint = process.env.R2_ENDPOINT
+  const bucket = process.env.R2_BUCKET
+  if (!endpoint && !bucket) return null
+  if (!endpoint || !bucket) throw new Error('R2_ENDPOINT and R2_BUCKET must both be set for this database')
+  const url = new URL(endpoint)
+  if (url.protocol !== 'https:') throw new Error('R2_ENDPOINT must use HTTPS')
+  return { endpoint: url.toString(), bucket }
+}
+
+function assertBucketIdentity(db: Database.Database) {
+  const configured = configuredBucketIdentity()
+  const saved = db.prepare('SELECT endpoint, bucket FROM database_identity WHERE id = 1').get() as { endpoint: string, bucket: string } | undefined
+  if (saved) {
+    if (!configured || saved.endpoint !== configured.endpoint || saved.bucket !== configured.bucket) {
+      throw new Error(`Database is bound to ${saved.endpoint} / ${saved.bucket}; configured R2 endpoint or bucket differs`)
+    }
+    return
+  }
+  const populated = db.prepare(`SELECT
+    EXISTS(SELECT 1 FROM scans) OR EXISTS(SELECT 1 FROM objects) OR
+    EXISTS(SELECT 1 FROM optimization_jobs) OR EXISTS(SELECT 1 FROM optimization_items) AS has_data`).get() as { has_data: number }
+  if (populated.has_data) {
+    throw new Error('Existing database has no bucket identity. Verify its bucket, then run the legacy database binding command before starting the app')
+  }
+  if (configured) {
+    db.prepare('INSERT OR IGNORE INTO database_identity (id, endpoint, bucket, bound_at) VALUES (1, ?, ?, ?)')
+      .run(configured.endpoint, configured.bucket, new Date().toISOString())
+    const bound = db.prepare('SELECT endpoint, bucket FROM database_identity WHERE id = 1').get() as { endpoint: string, bucket: string }
+    if (bound.endpoint !== configured.endpoint || bound.bucket !== configured.bucket) {
+      throw new Error(`Database is bound to ${bound.endpoint} / ${bound.bucket}; configured R2 endpoint or bucket differs`)
+    }
+  }
+}
+
 export function getDatabase() {
   if (!orm) {
     const path = resolve(process.env.DATABASE_PATH || '.data/optimizer.sqlite')
     mkdirSync(dirname(path), { recursive: true })
     connection = new Database(path)
-    connection.pragma('journal_mode = WAL')
-    connection.pragma('foreign_keys = ON')
-    connection.exec(`
+    try {
+      const journalMode = connection.pragma('journal_mode = WAL', { simple: true })
+      if (journalMode !== 'wal') throw new Error('SQLite WAL mode could not be enabled; use a local persistent volume')
+      connection.pragma('foreign_keys = ON')
+      connection.exec(`
       CREATE TABLE IF NOT EXISTS scans (
         id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT NOT NULL, status TEXT NOT NULL,
         discovered_count INTEGER NOT NULL DEFAULT 0, jpeg_count INTEGER NOT NULL DEFAULT 0,
@@ -42,21 +79,40 @@ export function getDatabase() {
         created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT
       );
       CREATE INDEX IF NOT EXISTS optimization_items_job_id_idx ON optimization_items(job_id);
+      CREATE TABLE IF NOT EXISTS database_identity (
+        id INTEGER PRIMARY KEY CHECK (id = 1), endpoint TEXT NOT NULL,
+        bucket TEXT NOT NULL, bound_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS worker_lease (
+        name TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL
+      );
     `)
-    // Additive migration for installations that already ran the discovery milestone.
-    const addColumn = (table: string, name: string, definition: string) => {
-      const existing = connection!.pragma(`table_info(${table})`) as { name: string }[]
-      if (!existing.some(column => column.name === name)) connection!.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`)
+      // Additive migration for installations that already ran the discovery milestone.
+      const addColumn = (table: string, name: string, definition: string) => {
+        const existing = connection!.pragma(`table_info(${table})`) as { name: string }[]
+        if (!existing.some(column => column.name === name)) connection!.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`)
+      }
+      addColumn('optimization_jobs', 'scan_id', 'INTEGER REFERENCES scans(id)')
+      addColumn('optimization_jobs', 'prefix', "TEXT NOT NULL DEFAULT ''")
+      addColumn('optimization_jobs', 'min_bytes', 'INTEGER NOT NULL DEFAULT 0')
+      addColumn('optimization_items', 'backup_key', 'TEXT')
+      addColumn('optimization_items', 'original_sha256', 'TEXT')
+      addColumn('optimization_items', 'optimized_sha256', 'TEXT')
+      assertBucketIdentity(connection)
+      orm = drizzle({ client: connection, schema })
+    } catch (error) {
+      connection.close()
+      connection = undefined
+      throw error
     }
-    addColumn('optimization_jobs', 'scan_id', 'INTEGER REFERENCES scans(id)')
-    addColumn('optimization_jobs', 'prefix', "TEXT NOT NULL DEFAULT ''")
-    addColumn('optimization_jobs', 'min_bytes', 'INTEGER NOT NULL DEFAULT 0')
-    addColumn('optimization_items', 'backup_key', 'TEXT')
-    addColumn('optimization_items', 'original_sha256', 'TEXT')
-    addColumn('optimization_items', 'optimized_sha256', 'TEXT')
-    orm = drizzle({ client: connection, schema })
   }
+  assertBucketIdentity(connection!)
   return orm
+}
+
+export function getDatabaseConnection() {
+  getDatabase()
+  return connection!
 }
 
 export function closeDatabase() {

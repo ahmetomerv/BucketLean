@@ -62,3 +62,16 @@ export const optimizationItems = sqliteTable('optimization_items', {
   startedAt: text('started_at'),
   finishedAt: text('finished_at'),
 })
+
+export const databaseIdentity = sqliteTable('database_identity', {
+  id: integer('id').primaryKey(),
+  endpoint: text('endpoint').notNull(),
+  bucket: text('bucket').notNull(),
+  boundAt: text('bound_at').notNull(),
+})
+
+export const workerLeases = sqliteTable('worker_lease', {
+  name: text('name').primaryKey(),
+  owner: text('owner').notNull(),
+  expiresAt: integer('expires_at').notNull(),
+})

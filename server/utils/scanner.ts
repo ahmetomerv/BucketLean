@@ -3,6 +3,7 @@ import { getDatabase } from './db'
 import { errorMessage, log } from './log'
 import { createR2Client, HeadObjectCommand, ListObjectsV2Command, r2Config } from './r2'
 import { objects, scans } from './schema'
+import { workerLease, WorkerLeaseLostError } from './worker-lease'
 
 export function isJpegKey(key: string) {
   return /\.(jpe?g)$/i.test(key) && !key.startsWith('__optimizer/originals/')
@@ -28,6 +29,11 @@ export function runNextScan() {
   const db = getDatabase()
   const scan = db.select().from(scans).where(inArray(scans.status, ['queued', 'running'])).orderBy(asc(scans.id)).get()
   if (!scan) return
+  try { if (!workerLease.tryAcquire()) return }
+  catch (error) {
+    log('error', 'scan_lease_claim_failed', { error: errorMessage(error) })
+    return
+  }
   active = runScan(scan.id).catch((error) => {
     log('error', 'scan_worker_failed', { scanId: scan.id, error: errorMessage(error) })
   }).finally(() => { active = undefined })
@@ -42,15 +48,18 @@ async function runScan(scanId: number) {
   try {
     const config = r2Config()
     client = createR2Client(config)
+    workerLease.assertOwned()
     if (scan.status === 'running' && !scan.cursor) db.delete(objects).where(eq(objects.scanId, scanId)).run()
     db.update(scans).set({ status: 'running', startedAt: scan.startedAt ?? new Date().toISOString(), error: null }).where(eq(scans.id, scanId)).run()
     log('info', 'scan_started', { scanId, prefix: scan.prefix })
     let cursor = scan.cursor ?? undefined
     do {
       if (stopping) return
+      workerLease.assertOwned()
       const page = await client.send(new ListObjectsV2Command({ Bucket: config.bucket, Prefix: scan.prefix || undefined, ContinuationToken: cursor, MaxKeys: 1000 }))
       for (const item of page.Contents ?? []) {
         if (stopping) return
+        workerLease.assertOwned()
         if (!item.Key) continue
         const jpeg = isJpegKey(item.Key)
         let optimized: boolean | null = null
@@ -68,6 +77,7 @@ async function runScan(scanId: number) {
             log('error', 'object_metadata_failed', { scanId, key: item.Key, error: metadataError })
           }
         }
+        workerLease.assertOwned()
         db.insert(objects).values({
           key: item.Key, scanId, etag: item.ETag ?? null, size: item.Size ?? 0,
           lastModified: item.LastModified?.toISOString() ?? null,
@@ -84,6 +94,7 @@ async function runScan(scanId: number) {
         }).run()
       }
       if (page.IsTruncated && !page.NextContinuationToken) throw new Error('R2 returned a truncated page without a continuation token')
+      workerLease.assertOwned()
       cursor = page.NextContinuationToken
       const counts = db.select({
         discovered: sql<number>`count(*)`,
@@ -97,9 +108,14 @@ async function runScan(scanId: number) {
         metadataErrorCount: counts?.errors ?? 0,
       }).where(eq(scans.id, scanId)).run()
     } while (cursor)
+    workerLease.assertOwned()
     db.update(scans).set({ status: 'completed', finishedAt: new Date().toISOString() }).where(eq(scans.id, scanId)).run()
     log('info', 'scan_completed', { scanId })
   } catch (error) {
+    if (error instanceof WorkerLeaseLostError) {
+      log('error', 'scan_lease_lost', { scanId })
+      return
+    }
     const message = errorMessage(error)
     db.update(scans).set({ status: 'failed', error: message, finishedAt: new Date().toISOString() }).where(eq(scans.id, scanId)).run()
     log('error', 'scan_failed', { scanId, error: message })

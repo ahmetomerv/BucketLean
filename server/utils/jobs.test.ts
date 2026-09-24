@@ -16,16 +16,28 @@ vi.mock('./r2', async (importOriginal) => {
 })
 vi.mock('./image', () => ({ qualities: { archival: 90, balanced: 82, aggressive: 72 }, optimizeImage: compress }))
 
-import { closeDatabase, getDatabase } from './db'
+import { closeDatabase, getDatabase, getDatabaseConnection } from './db'
 import { enqueueJob, getJobSummary, runNextJob } from './jobs'
 import { objects, optimizationItems, optimizationJobs, scans } from './schema'
+import { workerLease } from './worker-lease'
 
 let dir: string
+const previous = { DATABASE_PATH: process.env.DATABASE_PATH, R2_ENDPOINT: process.env.R2_ENDPOINT, R2_BUCKET: process.env.R2_BUCKET }
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'r2-jobs-test-'))
   process.env.DATABASE_PATH = join(dir, 'test.sqlite')
+  process.env.R2_ENDPOINT = 'https://example.r2.cloudflarestorage.com'
+  process.env.R2_BUCKET = 'test'
 })
-afterAll(() => { closeDatabase(); rmSync(dir, { recursive: true, force: true }); delete process.env.DATABASE_PATH })
+afterAll(() => {
+  workerLease.release()
+  closeDatabase()
+  rmSync(dir, { recursive: true, force: true })
+  for (const [name, value] of Object.entries(previous)) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+})
 
 test('continues after backup failure, replaces only after verified backup, and skips low savings', async () => {
   const store = new Map<string, { bytes: Buffer, etag: string, metadata: Record<string, string> }>()
@@ -233,4 +245,51 @@ test('accepts a matching preexisting backup but never overwrites a source change
   expect(item?.backupKey).toBeTruthy()
   expect(changed).toBe(true)
   expect(db.select().from(objects).where(eq(objects.key, key)).get()?.isOptimized).toBe(false)
+})
+
+test('stops before upload after lease loss and resumes the unfinished item under a new claim', async () => {
+  const key = 'safety/lease-loss.jpg'
+  const original = Buffer.alloc(100, 7)
+  const store = new Map<string, { bytes: Buffer, etag: string, metadata: Record<string, string> }>([
+    [key, { bytes: original, etag: '"old"', metadata: {} }],
+  ])
+  send.mockClear()
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) {
+      const value = store.get(command.input.Key!)
+      if (!value) throw new Error('Missing object')
+      return { ETag: value.etag, ContentLength: value.bytes.length, Metadata: value.metadata }
+    }
+    if (command instanceof GetObjectCommand) {
+      const value = store.get(command.input.Key!)
+      if (!value) throw new Error('Missing object')
+      return { ETag: value.etag, ContentLength: value.bytes.length,
+        Body: { transformToByteArray: async () => value.bytes } }
+    }
+    if (command instanceof PutObjectCommand) {
+      store.set(command.input.Key!, { bytes: Buffer.from(command.input.Body as Buffer), etag: '"new"', metadata: command.input.Metadata ?? {} })
+      return { ETag: '"new"' }
+    }
+    throw new Error('Unexpected command')
+  })
+  let attempts = 0
+  compress.mockImplementation(async () => {
+    if (++attempts === 1) getDatabaseConnection().prepare("UPDATE worker_lease SET owner = 'takeover', expires_at = ? WHERE name = 'worker'")
+      .run(Date.now() + 60_000)
+    return { output: Buffer.alloc(70, 7), width: 10, height: 10 }
+  })
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ prefix: 'safety/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  db.insert(objects).values({ key, scanId: scan.id, etag: '"old"', size: 100, isJpeg: true,
+    isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
+  const { job } = enqueueJob({ prefix: key, minBytes: 0, preset: 'balanced',
+    minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
+  await runNextJob()
+  expect(send.mock.calls.some(([command]) => command instanceof PutObjectCommand)).toBe(false)
+  expect(db.select().from(optimizationJobs).where(eq(optimizationJobs.id, job.id)).get()?.status).toBe('running')
+  expect(db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()?.status).toBe('processing')
+  getDatabaseConnection().prepare("DELETE FROM worker_lease WHERE name = 'worker'").run()
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ completed: 1, failed: 0, savedBytes: 30 })
+  expect(store.get(key)?.bytes.length).toBe(70)
 })

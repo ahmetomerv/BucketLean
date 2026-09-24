@@ -2,12 +2,22 @@ import { afterAll, expect, test } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import Database from 'better-sqlite3'
 import { getDatabase, closeDatabase } from './db'
 
 const dir = mkdtempSync(join(tmpdir(), 'r2-db-test-'))
 const path = join(dir, 'legacy.sqlite')
-afterAll(() => { closeDatabase(); rmSync(dir, { recursive: true, force: true }); delete process.env.DATABASE_PATH })
+const previous = { DATABASE_PATH: process.env.DATABASE_PATH, R2_ENDPOINT: process.env.R2_ENDPOINT, R2_BUCKET: process.env.R2_BUCKET }
+afterAll(() => {
+  closeDatabase()
+  rmSync(dir, { recursive: true, force: true })
+  for (const [name, value] of Object.entries(previous)) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+})
 
 test('adds job columns without dropping discovery data from an earlier database', () => {
   const legacy = new Database(path)
@@ -27,10 +37,35 @@ test('adds job columns without dropping discovery data from an earlier database'
   `)
   legacy.close()
   process.env.DATABASE_PATH = path
+  process.env.R2_ENDPOINT = 'https://account.r2.cloudflarestorage.com'
+  process.env.R2_BUCKET = 'original-bucket'
+  expect(() => getDatabase()).toThrow('Existing database has no bucket identity')
+  const bindingScript = fileURLToPath(new URL('../../scripts/bind-legacy-db.mjs', import.meta.url))
+  const denied = spawnSync(process.execPath, [bindingScript, '--confirm-endpoint', 'https://account.r2.cloudflarestorage.com/',
+    '--confirm-bucket', 'wrong-bucket'], { env: process.env, encoding: 'utf8' })
+  expect(denied.status).not.toBe(0)
+  const bound = spawnSync(process.execPath, [bindingScript, '--confirm-endpoint', 'https://account.r2.cloudflarestorage.com/',
+    '--confirm-bucket', 'original-bucket'], { env: process.env, encoding: 'utf8' })
+  expect(bound.status, bound.stderr).toBe(0)
   getDatabase()
   const migrated = new Database(path, { readonly: true })
   expect((migrated.prepare('SELECT discovered_count FROM scans WHERE id = 1').get() as { discovered_count: number }).discovered_count).toBe(42)
   expect((migrated.pragma('table_info(optimization_jobs)') as { name: string }[]).map(row => row.name)).toContain('scan_id')
   expect((migrated.pragma('table_info(optimization_items)') as { name: string }[]).map(row => row.name)).toContain('optimized_sha256')
+  expect(migrated.prepare('SELECT endpoint, bucket FROM database_identity WHERE id = 1').get()).toEqual({
+    endpoint: 'https://account.r2.cloudflarestorage.com/', bucket: 'original-bucket',
+  })
   migrated.close()
+  process.env.R2_BUCKET = 'different-bucket'
+  expect(() => getDatabase()).toThrow('Database is bound to')
+  process.env.R2_BUCKET = 'original-bucket'
+})
+
+test('binds an empty database to the configured bucket on first use', () => {
+  closeDatabase()
+  process.env.DATABASE_PATH = join(dir, 'fresh.sqlite')
+  getDatabase()
+  const db = new Database(process.env.DATABASE_PATH, { readonly: true })
+  expect(db.prepare('SELECT bucket FROM database_identity WHERE id = 1').get()).toEqual({ bucket: 'original-bucket' })
+  db.close()
 })
