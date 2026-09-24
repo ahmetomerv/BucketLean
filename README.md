@@ -2,6 +2,8 @@
 
 A private, self-hosted Nuxt application for finding and recompressing JPEGs in one Cloudflare R2 bucket. It uses one sequential worker, SQLite for persistent jobs, Sharp/MozJPEG for compression, and ExifTool to verify photo metadata.
 
+For component and data-flow diagrams with examples, see the [architecture overview](docs/architecture.md).
+
 ## How it works
 
 1. Scan the whole bucket or a prefix. The scan lists objects and reads JPEG object metadata; it never writes to R2.
