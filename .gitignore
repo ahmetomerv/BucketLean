@@ -2,6 +2,8 @@ node_modules
 .nuxt
 .output
 coverage
+docs/.vitepress/cache
+docs/.vitepress/dist
 .data
 .env
 !.env.example

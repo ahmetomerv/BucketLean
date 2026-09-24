@@ -19,5 +19,5 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Test, typecheck, and build
+      - name: Test, typecheck, and build app and docs
         run: npm run check

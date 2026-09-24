@@ -106,29 +106,18 @@ The API returns a queued job and candidate count. The worker begins asynchronous
 ### 3. Process one JPEG safely
 
 ```mermaid
-sequenceDiagram
-    participant W as Worker
-    participant DB as SQLite
-    participant R2 as R2 bucket
-    participant T as Temp file
-    participant I as Sharp and ExifTool
-    W->>R2: HEAD source; compare ETag and size with item
-    W->>R2: GET source with If-Match
-    R2-->>T: Stream with 128 MiB byte cap
-    W->>I: Validate, recompress, validate output and metadata
-    alt Saving below threshold
-        W->>DB: Mark skipped; do not write to R2
-    else Saving meets threshold
-        W->>DB: Save backup key and both SHA-256 hashes
-        W->>R2: PUT original backup with If-None-Match: *
-        W->>R2: GET and HEAD backup; verify hash and headers
-        W->>DB: Save backup_verified_at
-        W->>R2: PUT and GET restore manifest; verify it
-        W->>DB: Save manifest_verified_at and replacement_attempted_at
-        W->>R2: PUT optimized source with If-Match: original ETag
-        W->>R2: HEAD and GET source; GET backup; verify remote state
-        W->>DB: Mark completed and update object size
-    end
+flowchart TD
+    A[Check source ETag and size] --> B[Stream source to temp file with 128 MiB cap]
+    B --> C[Validate and recompress JPEG]
+    C --> D{Saving meets threshold?}
+    D -- No --> E[Mark skipped in SQLite]
+    D -- Yes --> F[Save backup key and hashes in SQLite]
+    F --> G[Write backup if absent and verify it]
+    G --> H[Write and verify restore manifest]
+    H --> I[Persist verified steps and replacement intent]
+    I --> J[Replace source only if original ETag matches]
+    J --> K[Read source and backup to verify remote state]
+    K --> L[Mark completed and update object size]
 ```
 
 The GET stream is capped even if R2 omits `Content-Length`. The worker hashes downloads while streaming to private temporary files and removes those files after use. Compression still loads the capped original into memory; Sharp can use additional native memory for decoded pixels.
@@ -193,4 +182,4 @@ An item is marked `completed` only after the optimized source and original backu
 - The dashboard and data APIs require `APP_PASSWORD` through HTTP Basic authentication; `/api/health` is public and checks local SQLite/configuration presence, not live R2 availability. Put HTTPS in front of a deployed app. R2 credentials stay server-side.
 - SQLite contains durable progress, retry deadlines, hashes, and the lease. Use `npm run db:snapshot -- --output <new-path>` for a consistent snapshot and keep a verified copy outside the app host.
 - R2 backups and manifests are separate prefixes. `npm run manifest:backfill` verifies older backups and creates missing manifests. `npm run restore:drill` can verify a backup without SQLite; with `--apply`, it writes a separate object under `__optimizer/restore-drills/` and checks its hash and headers without changing the source.
-- The application does not automatically restore originals or delete backups. Configure a backup expiration rule only after snapshots, manifest verification, and a restore drill. See [README.md](../README.md) for exact commands and deployment steps.
+- The application does not automatically restore originals or delete backups. Configure a backup expiration rule only after snapshots, manifest verification, and a restore drill. See [Operations and recovery](./operations.md) for commands and deployment notes.

@@ -4,6 +4,20 @@ A private, self-hosted Nuxt application for finding and recompressing JPEGs in o
 
 For component and data-flow diagrams with examples, see the [architecture overview](docs/architecture.md).
 
+## Documentation site
+
+The [VitePress documentation](docs/index.md) includes the [HTTP API reference](docs/api/endpoints.md), an [automation workflow](docs/api/workflow.md), architecture, and recovery procedures. It builds separately from the private app into static files; it does not need R2 credentials:
+
+```sh
+npm ci
+npm run docs:dev
+npm run docs:check
+```
+
+`docs:dev` serves the documentation at `http://localhost:5173/` by default. It is separate from the Nuxt app at `http://localhost:3000/`. `docs:preview` serves the built static site at `http://localhost:4173/` by default.
+
+Publish `docs/.vitepress/dist` with any static host. The default build uses `/` as its base; for a subpath, set a matching base during both build and verification, for example `DOCS_BASE=/r2-jpeg-optimizer/ npm run docs:check`. Use `npm run docs:preview` for a local preview. The site is not automatically deployed; [operations and recovery](docs/operations.md#build-and-publish-this-documentation) has the publishing details.
+
 ## How it works
 
 1. Scan the whole bucket or a prefix. The scan lists objects and reads JPEG object metadata; it never writes to R2.
