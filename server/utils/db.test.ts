@@ -100,3 +100,25 @@ test('moves legacy ambiguous failures to attention exactly once', () => {
   expect(reopened.prepare('SELECT status FROM optimization_items WHERE id = 1').get()).toEqual({ status: 'failed' })
   reopened.close()
 })
+
+test('migrates older completed jobs with failed items to completed_with_errors', () => {
+  closeDatabase()
+  const migrationPath = join(dir, 'job-errors.sqlite')
+  process.env.DATABASE_PATH = migrationPath
+  getDatabase()
+  closeDatabase()
+  const old = new Database(migrationPath)
+  old.exec(`
+    INSERT INTO optimization_jobs (id, status, preset, created_at) VALUES (1, 'completed', 'balanced', '2026-09-23');
+    INSERT INTO optimization_items (job_id, key, original_size, status, created_at)
+      VALUES (1, 'failed.jpg', 100, 'failed', '2026-09-23');
+    DELETE FROM app_migrations WHERE name = 'job_error_status_v1';
+  `)
+  old.close()
+  getDatabase()
+  const migrated = new Database(migrationPath, { readonly: true })
+  expect(migrated.prepare('SELECT status FROM optimization_jobs WHERE id = 1').get()).toEqual({ status: 'completed_with_errors' })
+  expect((migrated.pragma('table_info(optimization_items)') as { name: string }[]).map(row => row.name))
+    .toEqual(expect.arrayContaining(['attempt_count', 'transient_failures', 'next_attempt_at', 'error_kind']))
+  migrated.close()
+})

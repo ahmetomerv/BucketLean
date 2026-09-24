@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import sharp from 'sharp'
 import { exiftool } from 'exiftool-vendored'
 import { optimizeImage, stopExifTool } from './image'
+import { InvalidJpegError } from './failures'
 
 afterAll(async () => { await stopExifTool() })
 
@@ -42,7 +43,14 @@ test('MozJPEG output preserves dimensions, camera EXIF, and ICC profile', async 
 })
 
 test('rejects a non-JPEG input', async () => {
-  await expect(optimizeImage(Buffer.from('not an image'), 'balanced', true)).rejects.toThrow()
+  await expect(optimizeImage(Buffer.from('not an image'), 'balanced', true)).rejects.toBeInstanceOf(InvalidJpegError)
+})
+
+test('rejects a JPEG with a readable header but incomplete pixel data', async () => {
+  const complete = await sharp({ create: { width: 200, height: 200, channels: 3, background: '#cc9966' } })
+    .jpeg().toBuffer()
+  const truncated = complete.subarray(0, Math.floor(complete.length / 2))
+  await expect(optimizeImage(truncated, 'balanced', true)).rejects.toBeInstanceOf(InvalidJpegError)
 })
 
 test('can intentionally strip photo metadata when preservation is disabled', async () => {

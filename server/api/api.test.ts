@@ -25,10 +25,11 @@ beforeAll(async () => {
   // Nitro provides these H3 imports to route files at build time.
   for (const [name, value] of Object.entries({ createError, defineEventHandler, getHeader, getQuery,
     getRouterParam, readBody, setHeader, setResponseStatus })) vi.stubGlobal(name, value)
-  const [auth, health, overview, listObjects, listJobs, jobDetail, createJob, createScan, reconcileJob] = await Promise.all([
+  const [auth, health, overview, listObjects, listJobs, jobDetail, createJob, createScan, reconcileJob, resumeJob] = await Promise.all([
     import('../middleware/auth'), import('./health.get'), import('./overview.get'), import('./objects.get'),
     import('./jobs.get'), import('./jobs/[id].get'), import('./jobs.post'), import('./scan.post'),
     import('./jobs/[id]/reconcile.post'),
+    import('./jobs/[id]/resume.post'),
   ])
   const router = createRouter()
   router.get('/api/health', health.default)
@@ -38,6 +39,7 @@ beforeAll(async () => {
   router.get('/api/jobs/:id', jobDetail.default)
   router.post('/api/jobs', createJob.default)
   router.post('/api/jobs/:id/reconcile', reconcileJob.default)
+  router.post('/api/jobs/:id/resume', resumeJob.default)
   router.post('/api/scan', createScan.default)
   const app = createApp()
   app.use(auth.default)
@@ -135,12 +137,20 @@ test('reconciliation routes validate state and unresolved jobs block new work', 
   process.env.R2_SECRET_ACCESS_KEY = 'test'
   expect((await call('/api/jobs/nope/reconcile', { method: 'POST' })).status).toBe(400)
   expect((await call('/api/jobs/999999/reconcile', { method: 'POST' })).status).toBe(404)
+  expect((await call('/api/jobs/nope/resume', { method: 'POST' })).status).toBe(400)
+  expect((await call('/api/jobs/999999/resume', { method: 'POST' })).status).toBe(404)
   const db = getDatabase()
+  const paused = db.insert(optimizationJobs).values({ status: 'paused', preset: 'balanced',
+    pauseReason: 'credentials: Access denied', createdAt: new Date().toISOString() }).returning().get()
+  expect((await call('/api/scan', { method: 'POST', body: { prefix: '' } })).status).toBe(409)
+  expect((await call('/api/jobs', { method: 'POST', body: {} })).status).toBe(409)
+  expect((await call(`/api/jobs/${paused.id}/resume`, { method: 'POST' })).status).toBe(202)
   const job = db.insert(optimizationJobs).values({ status: 'needs_attention', preset: 'balanced',
     createdAt: new Date().toISOString() }).returning().get()
   expect((await call('/api/scan', { method: 'POST', body: { prefix: '' } })).status).toBe(409)
   expect((await call('/api/jobs', { method: 'POST', body: {} })).status).toBe(409)
   expect((await call(`/api/jobs/${job.id}/reconcile`, { method: 'POST' })).status).toBe(409)
+  expect((await call(`/api/jobs/${job.id}/resume`, { method: 'POST' })).status).toBe(409)
   for (let index = 0; index < 11; index++) db.insert(optimizationJobs).values({ status: 'completed', preset: 'balanced',
     createdAt: new Date().toISOString() }).run()
   const listed = await (await call('/api/jobs')).json() as { jobs: { job: { id: number, status: string } }[] }

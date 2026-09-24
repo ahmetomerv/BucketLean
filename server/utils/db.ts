@@ -100,6 +100,11 @@ export function getDatabase() {
       addColumn('optimization_items', 'optimized_sha256', 'TEXT')
       addColumn('optimization_items', 'backup_verified_at', 'TEXT')
       addColumn('optimization_items', 'replacement_attempted_at', 'TEXT')
+      addColumn('optimization_jobs', 'pause_reason', 'TEXT')
+      addColumn('optimization_items', 'error_kind', 'TEXT')
+      addColumn('optimization_items', 'attempt_count', 'INTEGER NOT NULL DEFAULT 0')
+      addColumn('optimization_items', 'transient_failures', 'INTEGER NOT NULL DEFAULT 0')
+      addColumn('optimization_items', 'next_attempt_at', 'INTEGER')
       connection.exec('CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)')
       if (!connection.prepare('SELECT 1 FROM app_migrations WHERE name = ?').get('uncertain_replacements_v1')) {
         connection.transaction(() => {
@@ -112,6 +117,16 @@ export function getDatabase() {
             )`)
           connection!.prepare('INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)')
             .run('uncertain_replacements_v1', new Date().toISOString())
+        }).immediate()
+      }
+      if (!connection.prepare('SELECT 1 FROM app_migrations WHERE name = ?').get('job_error_status_v1')) {
+        connection.transaction(() => {
+          connection!.exec(`UPDATE optimization_jobs SET status = 'completed_with_errors'
+            WHERE status = 'completed' AND EXISTS (
+              SELECT 1 FROM optimization_items WHERE job_id = optimization_jobs.id AND status IN ('failed', 'invalid_jpeg')
+            )`)
+          connection!.prepare('INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)')
+            .run('job_error_status_v1', new Date().toISOString())
         }).immediate()
       }
       assertBucketIdentity(connection)

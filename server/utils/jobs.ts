@@ -11,6 +11,7 @@ import { createR2Client, r2Config } from './r2'
 import { objects, optimizationItems, optimizationJobs, scans } from './schema'
 import { prefixCondition } from './query'
 import { workerLease, WorkerLeaseLostError } from './worker-lease'
+import { classifyFailure, MAX_TRANSIENT_FAILURES, retryDelayMs, SourceChangedError } from './failures'
 
 const MAX_IMAGE_BYTES = 128 * 1024 * 1024
 type Client = Pick<S3Client, 'send'>
@@ -35,7 +36,7 @@ export function enqueueJob(input: { prefix: string, minBytes: number, preset: Pr
   const activeScan = db.select({ id: scans.id }).from(scans).where(inArray(scans.status, ['queued', 'running'])).get()
   if (activeScan) throw new Error('Wait for the current scan to finish')
   const activeJob = db.select({ id: optimizationJobs.id }).from(optimizationJobs)
-    .where(inArray(optimizationJobs.status, ['queued', 'running', 'needs_attention'])).get()
+    .where(inArray(optimizationJobs.status, ['queued', 'running', 'paused', 'needs_attention'])).get()
   if (activeJob) throw new Error('Resolve the existing optimization job before creating another')
   const scan = db.select().from(scans).where(eq(scans.status, 'completed')).orderBy(desc(scans.id)).get()
   if (!scan) throw new Error('Complete a scan before creating a job')
@@ -87,6 +88,24 @@ export function enqueueReconciliation(jobId: number) {
   return { jobId }
 }
 
+export function resumeJob(jobId: number) {
+  r2Config()
+  const db = getDatabase()
+  db.transaction((tx) => {
+    const job = tx.select().from(optimizationJobs).where(eq(optimizationJobs.id, jobId)).get()
+    if (!job) throw new Error('Job not found')
+    if (job.status !== 'paused') throw new Error('Job is not paused')
+    if (tx.select({ id: scans.id }).from(scans).where(inArray(scans.status, ['queued', 'running'])).get()) {
+      throw new Error('Wait for the current scan to finish')
+    }
+    tx.update(optimizationJobs).set({ status: 'queued', pauseReason: null })
+      .where(eq(optimizationJobs.id, jobId)).run()
+  })
+  log('info', 'job_resumed', { jobId })
+  void runNextJob()
+  return { jobId }
+}
+
 export function getJobSummary(jobId: number) {
   const db = getDatabase()
   const job = db.select().from(optimizationJobs).where(eq(optimizationJobs.id, jobId)).get()
@@ -95,11 +114,14 @@ export function getJobSummary(jobId: number) {
     total: sql<number>`count(*)`,
     completed: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'completed' then 1 else 0 end), 0)`,
     skipped: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'skipped' then 1 else 0 end), 0)`,
+    sourceChanged: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'source_changed' then 1 else 0 end), 0)`,
+    invalidJpeg: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'invalid_jpeg' then 1 else 0 end), 0)`,
     failed: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'failed' then 1 else 0 end), 0)`,
     needsAttention: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'needs_attention' then 1 else 0 end), 0)`,
-    unknownFinalCount: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'needs_attention' or
-      (${optimizationItems.replacementAttemptedAt} is not null and ${optimizationItems.status} not in ('completed', 'skipped', 'failed'))
+    unknownFinalCount: sql<number>`coalesce(sum(case when ${optimizationItems.status} in ('needs_attention', 'source_changed') or
+      (${optimizationItems.replacementAttemptedAt} is not null and ${optimizationItems.status} not in ('completed', 'skipped', 'source_changed', 'invalid_jpeg', 'failed'))
       then 1 else 0 end), 0)`,
+    nextRetryAt: sql<number | null>`min(case when ${optimizationItems.status} = 'retry_wait' then ${optimizationItems.nextAttemptAt} end)`,
     originalBytes: sql<number>`coalesce(sum(${optimizationItems.originalSize}), 0)`,
     calculatedFinalBytes: sql<number>`coalesce(sum(case when ${optimizationItems.status} = 'completed' then ${optimizationItems.optimizedSize} else ${optimizationItems.originalSize} end), 0)`,
   }).from(optimizationItems).where(eq(optimizationItems.jobId, jobId)).get()!
@@ -195,7 +217,7 @@ async function reconcileRemoteState(client: Client, bucket: string, job: Job, it
       .set({ backupVerifiedAt: null }).where(eq(optimizationItems.id, item.id)).run()
     return 'original' as const
   }
-  throw new Error('Source differs from the recorded original and verified replacement; inspect both objects')
+  throw new SourceChangedError('Source differs from the recorded original and verified replacement; inspect both objects')
 }
 
 async function processItem(client: Client, bucket: string, job: Job, item: Item) {
@@ -211,7 +233,8 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
     return
   }
   if (!item.etag || etag(head.ETag) !== etag(item.etag) || head.ContentLength !== item.originalSize) {
-    db.update(optimizationItems).set({ status: 'skipped', error: 'Object changed since the scan', finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
+    db.update(optimizationItems).set({ status: 'source_changed', errorKind: 'source_changed',
+      error: 'Object changed since the scan', finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
     return
   }
   if (item.originalSize > MAX_IMAGE_BYTES) {
@@ -221,7 +244,7 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
   db.update(optimizationItems).set({ status: 'downloading', startedAt: item.startedAt ?? new Date().toISOString(), error: null }).where(eq(optimizationItems.id, item.id)).run()
   const downloaded = await readObject(client, bucket, item.key, item.etag)
   workerLease.assertOwned()
-  if (etag(downloaded.etag) !== etag(item.etag) || downloaded.bytes.length !== item.originalSize) throw new Error('Original changed during download')
+  if (etag(downloaded.etag) !== etag(item.etag) || downloaded.bytes.length !== item.originalSize) throw new SourceChangedError('Original changed during download')
   db.update(optimizationItems).set({ status: 'processing' }).where(eq(optimizationItems.id, item.id)).run()
   const { output } = await optimizeImage(downloaded.bytes, job.preset as Preset, job.preserveMetadata)
   workerLease.assertOwned()
@@ -265,7 +288,8 @@ async function processItem(client: Client, bucket: string, job: Job, item: Item)
   if (outcome === 'completed') return
   const cause = putError ? isPreconditionFailure(putError) ? 'Conditional replacement was rejected' : errorMessage(putError)
     : 'Replacement returned success'
-  throw new Error(`${cause}; the original is still present. Recheck the job to retry safely`)
+  if (putError && isPreconditionFailure(putError)) throw new SourceChangedError(`${cause}; the original is still present. Recheck the job before retrying`)
+  throw new Error(`${cause}; the original is still present. Recheck the job to retry safely`, { cause: putError })
 }
 
 let stopping = false
@@ -276,6 +300,13 @@ export function runNextJob() {
   const db = getDatabase()
   const job = db.select().from(optimizationJobs).where(inArray(optimizationJobs.status, ['queued', 'running'])).orderBy(asc(optimizationJobs.id)).get()
   if (!job) return
+  const unfinished = db.select({ id: optimizationItems.id }).from(optimizationItems)
+    .where(and(eq(optimizationItems.jobId, job.id), inArray(optimizationItems.status,
+      ['pending', 'downloading', 'processing', 'uploading', 'retry_wait']))).get()
+  const runnable = db.select({ id: optimizationItems.id }).from(optimizationItems).where(and(eq(optimizationItems.jobId, job.id),
+    sql`(${optimizationItems.status} in ('pending', 'downloading', 'processing', 'uploading') or
+      (${optimizationItems.status} = 'retry_wait' and (${optimizationItems.nextAttemptAt} is null or ${optimizationItems.nextAttemptAt} <= ${Date.now()})))`)).get()
+  if (unfinished && !runnable) return
   try { if (!workerLease.tryAcquire()) return }
   catch (error) {
     log('error', 'job_lease_claim_failed', { error: errorMessage(error) })
@@ -287,40 +318,89 @@ export function runNextJob() {
 
 async function runJob(job: Job) {
   const db = getDatabase()
-  const config = r2Config()
-  const client = createR2Client(config)
+  let client: ReturnType<typeof createR2Client> | undefined
   try {
+    const config = r2Config()
+    client = createR2Client(config)
     workerLease.assertOwned()
     db.update(optimizationJobs).set({ status: 'running', startedAt: job.startedAt ?? new Date().toISOString() }).where(eq(optimizationJobs.id, job.id)).run()
     log('info', 'job_started', { jobId: job.id })
+    let paused = false
     while (!stopping) {
       workerLease.assertOwned()
       const item = db.select().from(optimizationItems).where(and(eq(optimizationItems.jobId, job.id),
-        inArray(optimizationItems.status, ['pending', 'downloading', 'processing', 'uploading']))).orderBy(asc(optimizationItems.id)).get()
+        sql`(${optimizationItems.status} in ('pending', 'downloading', 'processing', 'uploading') or
+          (${optimizationItems.status} = 'retry_wait' and (${optimizationItems.nextAttemptAt} is null or ${optimizationItems.nextAttemptAt} <= ${Date.now()})))`))
+        .orderBy(asc(optimizationItems.id)).get()
       if (!item) break
+      db.update(optimizationItems).set({ attemptCount: item.attemptCount + 1, nextAttemptAt: null,
+        error: null, errorKind: null }).where(eq(optimizationItems.id, item.id)).run()
       try { await processItem(client, config.bucket, job, item) }
       catch (error) {
         if (error instanceof WorkerLeaseLostError) throw error
         workerLease.assertOwned()
         const message = errorMessage(error)
+        const kind = classifyFailure(error)
         const latest = db.select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()!
         const uncertain = latest.status === 'uploading' || !!latest.backupKey || !!latest.replacementAttemptedAt
-        const status = uncertain ? 'needs_attention' : 'failed'
-        db.update(optimizationItems).set({ status, error: message, finishedAt: new Date().toISOString() })
-          .where(eq(optimizationItems.id, item.id)).run()
-        log('error', uncertain ? 'item_needs_attention' : 'item_failed',
-          { jobId: job.id, itemId: item.id, key: item.key, error: message })
+        if (kind === 'credentials' || kind === 'bucket') {
+          db.transaction((tx) => {
+            tx.update(optimizationItems).set({ status: latest.status === 'retry_wait' ? (uncertain ? 'uploading' : 'pending') : latest.status,
+              error: message, errorKind: kind }).where(eq(optimizationItems.id, item.id)).run()
+            tx.update(optimizationJobs).set({ status: 'paused', pauseReason: `${kind}: ${message}` })
+              .where(eq(optimizationJobs.id, job.id)).run()
+          })
+          log('error', 'job_paused', { jobId: job.id, itemId: item.id, key: item.key, kind, error: message })
+          paused = true
+          break
+        }
+        if (kind === 'transient' || kind === 'throttled') {
+          const failures = latest.transientFailures + 1
+          if (failures < MAX_TRANSIENT_FAILURES) {
+            const nextAttemptAt = Date.now() + retryDelayMs(failures)
+            db.update(optimizationItems).set({ status: 'retry_wait', transientFailures: failures,
+              nextAttemptAt, error: message, errorKind: kind }).where(eq(optimizationItems.id, item.id)).run()
+            log('info', 'item_retry_scheduled', { jobId: job.id, itemId: item.id, key: item.key,
+              kind, failures, nextAttemptAt })
+            continue
+          }
+          db.update(optimizationItems).set({ transientFailures: failures }).where(eq(optimizationItems.id, item.id)).run()
+        }
+        const status = uncertain ? 'needs_attention'
+          : kind === 'source_changed' ? 'source_changed'
+            : kind === 'invalid_jpeg' ? 'invalid_jpeg' : 'failed'
+        db.update(optimizationItems).set({ status, error: message, errorKind: kind,
+          finishedAt: new Date().toISOString() }).where(eq(optimizationItems.id, item.id)).run()
+        log('error', status === 'needs_attention' ? 'item_needs_attention'
+          : status === 'source_changed' ? 'item_source_changed'
+            : status === 'invalid_jpeg' ? 'item_invalid_jpeg' : 'item_failed',
+          { jobId: job.id, itemId: item.id, key: item.key, kind, error: message })
       }
     }
-    if (!stopping) {
+    if (!stopping && !paused) {
       workerLease.assertOwned()
+      const unfinished = db.select({ id: optimizationItems.id }).from(optimizationItems)
+        .where(and(eq(optimizationItems.jobId, job.id), inArray(optimizationItems.status,
+          ['pending', 'downloading', 'processing', 'uploading', 'retry_wait']))).get()
+      if (unfinished) return
       const needsAttention = db.select({ id: optimizationItems.id }).from(optimizationItems)
         .where(and(eq(optimizationItems.jobId, job.id), eq(optimizationItems.status, 'needs_attention'))).get()
-      const status = needsAttention ? 'needs_attention' : 'completed'
+      const errors = db.select({ id: optimizationItems.id }).from(optimizationItems)
+        .where(and(eq(optimizationItems.jobId, job.id), inArray(optimizationItems.status, ['failed', 'invalid_jpeg']))).get()
+      const status = needsAttention ? 'needs_attention' : errors ? 'completed_with_errors' : 'completed'
       db.update(optimizationJobs).set({ status, finishedAt: new Date().toISOString() }).where(eq(optimizationJobs.id, job.id)).run()
-      log('info', status === 'completed' ? 'job_completed' : 'job_needs_attention', { jobId: job.id })
+      log('info', status === 'completed' ? 'job_completed'
+        : status === 'completed_with_errors' ? 'job_completed_with_errors' : 'job_needs_attention', { jobId: job.id })
     }
-  } finally { client.destroy() }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'R2 connection is not configured') {
+      db.update(optimizationJobs).set({ status: 'paused', pauseReason: `credentials: ${error.message}` })
+        .where(eq(optimizationJobs.id, job.id)).run()
+      log('error', 'job_paused', { jobId: job.id, kind: 'credentials', error: error.message })
+      return
+    }
+    throw error
+  } finally { client?.destroy() }
 }
 
 export async function stopJobWorker() {

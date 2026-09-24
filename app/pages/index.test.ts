@@ -14,21 +14,22 @@ type DashboardData = {
   eligible?: number
   activeJob?: boolean
   attentionJob?: boolean
+  pausedJob?: boolean
 }
 
-function setupData({ scan = null, eligible = 0, activeJob = false, attentionJob = false }: DashboardData = {}) {
+function setupData({ scan = null, eligible = 0, activeJob = false, attentionJob = false, pausedJob = false }: DashboardData = {}) {
   const overview = ref({ scan, totals: { objects: 0, jpegs: eligible, jpegBytes: 0, optimized: 0, eligible, metadataUnknown: 0 } })
   const objects = ref({ items: [], total: 0, page: 1, pageSize: 100 })
   const attentionSummary = { job: { id: 1, status: 'needs_attention' },
-    total: 1, completed: 0, skipped: 0, failed: 0, needsAttention: 1,
-    originalBytes: 100, finalBytes: null, savedBytes: null, savedPercent: null, current: null }
+    total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 1,
+    originalBytes: 100, finalBytes: null, savedBytes: null, savedPercent: null, current: null, nextRetryAt: null }
   const jobs = ref({ jobs: attentionJob ? [
     { ...attentionSummary, job: { id: 2, status: 'completed' }, needsAttention: 0,
       finalBytes: 70, savedBytes: 30, savedPercent: 30 }, attentionSummary,
-  ] : activeJob ? [{ job: { id: 1, status: 'running' },
-    total: 1, completed: 0, skipped: 0, failed: 0, needsAttention: attentionJob ? 1 : 0,
+  ] : activeJob || pausedJob ? [{ job: { id: 1, status: pausedJob ? 'paused' : 'running', pauseReason: pausedJob ? 'credentials: Access denied' : null },
+    total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 0,
     originalBytes: 100, finalBytes: 100, savedBytes: 0,
-    savedPercent: 0, current: null }] : [] })
+    savedPercent: 0, current: null, nextRetryAt: null }] : [] })
   vi.stubGlobal('useFetch', (url: string) => {
     if (url === '/api/overview') return { data: overview, refresh: refreshOverview }
     if (url === '/api/objects') return { data: objects, refresh: refreshObjects }
@@ -124,6 +125,20 @@ test('an uncertain job shows unknown totals and offers an explicit remote rechec
   await button('Recheck remote state').trigger('click')
   await flushPromises()
   expect(post).toHaveBeenCalledWith('/api/jobs/1/reconcile', { method: 'POST' })
+  expect(refreshJobs).toHaveBeenCalledOnce()
+  wrapper.unmount()
+})
+
+test('a paused job shows the access error and resumes explicitly', async () => {
+  setupData({ scan: { id: 1, status: 'completed', prefix: '', discoveredCount: 1,
+    metadataErrorCount: 0, startedAt: null }, eligible: 1, pausedJob: true })
+  const { wrapper, button } = await renderPage()
+  expect(wrapper.text()).toContain('Access denied')
+  expect(button('Start scan').attributes('disabled')).toBeDefined()
+  expect(button('Job paused').attributes('disabled')).toBeDefined()
+  await button('Resume job').trigger('click')
+  await flushPromises()
+  expect(post).toHaveBeenCalledWith('/api/jobs/1/resume', { method: 'POST' })
   expect(refreshJobs).toHaveBeenCalledOnce()
   wrapper.unmount()
 })

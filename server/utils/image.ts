@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import sharp from 'sharp'
 import { exiftool } from 'exiftool-vendored'
+import { InvalidJpegError } from './failures'
 
 export const qualities = { archival: 90, balanced: 82, aggressive: 72 } as const
 export type Preset = keyof typeof qualities
@@ -25,8 +26,12 @@ export async function optimizeImage(input: Buffer, preset: Preset, preserveMetad
     const originalPath = join(dir, 'original.jpg')
     const optimizedPath = join(dir, 'optimized.jpg')
     await writeFile(originalPath, input)
-    const before = await sharp(input).metadata()
-    if (before.format !== 'jpeg' || !before.width || !before.height) throw new Error('Input is not a valid JPEG')
+    let before: Awaited<ReturnType<ReturnType<typeof sharp>['metadata']>>
+    try { before = await sharp(input).metadata() }
+    catch { throw new InvalidJpegError() }
+    if (before.format !== 'jpeg' || !before.width || !before.height) throw new InvalidJpegError()
+    try { await sharp(input, { failOn: 'error' }).stats() }
+    catch { throw new InvalidJpegError() }
     const originalTags = await exiftool.read(originalPath) as Record<string, unknown>
     if (Array.isArray(originalTags.errors) && originalTags.errors.length) throw new Error(`Original metadata could not be read: ${originalTags.errors.join('; ')}`)
 

@@ -6,20 +6,25 @@ import { eq } from 'drizzle-orm'
 import { createHash } from 'node:crypto'
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3'
 
-const { send, compress } = vi.hoisted(() => ({ send: vi.fn(), compress: vi.fn() }))
+const { send, compress, configFailure } = vi.hoisted(() => ({ send: vi.fn(), compress: vi.fn(), configFailure: vi.fn() }))
 vi.mock('./r2', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./r2')>()
   return { ...actual,
-    r2Config: () => ({ endpoint: 'https://example.r2.cloudflarestorage.com', bucket: 'test', accessKeyId: 'x', secretAccessKey: 'x' }),
+    r2Config: () => {
+      const error = configFailure()
+      if (error) throw error
+      return { endpoint: 'https://example.r2.cloudflarestorage.com', bucket: 'test', accessKeyId: 'x', secretAccessKey: 'x' }
+    },
     createR2Client: () => ({ send, destroy: vi.fn() }),
   }
 })
 vi.mock('./image', () => ({ qualities: { archival: 90, balanced: 82, aggressive: 72 }, optimizeImage: compress }))
 
 import { closeDatabase, getDatabase, getDatabaseConnection } from './db'
-import { enqueueJob, enqueueReconciliation, getJobSummary, runNextJob } from './jobs'
+import { enqueueJob, enqueueReconciliation, getJobSummary, resumeJob, runNextJob } from './jobs'
 import { objects, optimizationItems, optimizationJobs, scans } from './schema'
 import { workerLease } from './worker-lease'
+import { InvalidJpegError } from './failures'
 
 let dir: string
 let databaseNumber = 0
@@ -33,6 +38,7 @@ beforeEach(() => {
   process.env.DATABASE_PATH = join(dir, `${++databaseNumber}.sqlite`)
   send.mockReset()
   compress.mockReset()
+  configFailure.mockReset()
 })
 afterEach(() => {
   workerLease.release()
@@ -44,6 +50,175 @@ afterAll(() => {
     if (value === undefined) delete process.env[name]
     else process.env[name] = value
   }
+})
+
+function queueOne(key: string) {
+  const db = getDatabase()
+  const job = db.insert(optimizationJobs).values({ status: 'queued', preset: 'balanced',
+    minimumSavingPercent: 15, backupOriginals: true, preserveMetadata: true,
+    createdAt: new Date().toISOString() }).returning().get()
+  const item = db.insert(optimizationItems).values({ jobId: job.id, key, etag: '"old"',
+    originalSize: 100, status: 'pending', createdAt: new Date().toISOString() }).returning().get()
+  return { job, item }
+}
+
+test('persists bounded retries across a restart for 503 and 429 responses', async () => {
+  let heads = 0
+  send.mockImplementation(async (command: unknown) => {
+    if (!(command instanceof HeadObjectCommand)) throw new Error('Unexpected write or download')
+    heads++
+    if (heads === 1) throw { $metadata: { httpStatusCode: 503 } }
+    if (heads === 2) throw { $metadata: { httpStatusCode: 429 } }
+    return { ETag: '"changed"', ContentLength: 100, Metadata: {} }
+  })
+  const { job, item } = queueOne('retry.jpg')
+  await runNextJob()
+  const first = getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()!
+  expect(first).toMatchObject({ status: 'retry_wait', attemptCount: 1, transientFailures: 1, errorKind: 'transient' })
+  expect(first.nextAttemptAt! - Date.now()).toBeGreaterThan(0)
+  expect(first.nextAttemptAt! - Date.now()).toBeLessThanOrEqual(2000)
+  workerLease.release()
+  closeDatabase()
+  await runNextJob()
+  expect(heads).toBe(1)
+  getDatabase().update(optimizationItems).set({ nextAttemptAt: Date.now() - 1 }).where(eq(optimizationItems.id, item.id)).run()
+  await runNextJob()
+  const second = getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()!
+  expect(second).toMatchObject({ status: 'retry_wait', attemptCount: 2, transientFailures: 2, errorKind: 'throttled' })
+  expect(second.nextAttemptAt! - Date.now()).toBeGreaterThan(0)
+  expect(second.nextAttemptAt! - Date.now()).toBeLessThanOrEqual(4000)
+  getDatabase().update(optimizationItems).set({ nextAttemptAt: null }).where(eq(optimizationItems.id, item.id)).run()
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'completed' }, sourceChanged: 1, failed: 0 })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()?.attemptCount).toBe(3)
+  expect(heads).toBe(3)
+})
+
+test('rechecks source and backup before retrying a 503 from the replacement PUT', async () => {
+  const key = 'retry-put.jpg'
+  const original = Buffer.alloc(100, 13)
+  const store = new Map<string, { bytes: Buffer, etag: string, metadata: Record<string, string> }>([
+    [key, { bytes: original, etag: '"old"', metadata: {} }],
+  ])
+  let sourcePuts = 0
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand || command instanceof GetObjectCommand) {
+      const object = store.get(command.input.Key!)
+      if (!object) throw { $metadata: { httpStatusCode: 404 }, name: 'NoSuchKey' }
+      if (command instanceof HeadObjectCommand) return { ETag: object.etag,
+        ContentLength: object.bytes.length, Metadata: object.metadata }
+      return { ETag: object.etag, ContentLength: object.bytes.length,
+        Body: { transformToByteArray: async () => object.bytes } }
+    }
+    if (command instanceof PutObjectCommand) {
+      if (command.input.IfNoneMatch === '*' && store.has(command.input.Key!)) throw { $metadata: { httpStatusCode: 412 } }
+      if (command.input.Key === key && ++sourcePuts === 1) throw { $metadata: { httpStatusCode: 503 } }
+      store.set(command.input.Key!, { bytes: Buffer.from(command.input.Body as Buffer),
+        etag: '"new"', metadata: command.input.Metadata ?? {} })
+      return { ETag: '"new"' }
+    }
+    throw new Error('Unexpected command')
+  })
+  compress.mockResolvedValue({ output: Buffer.alloc(70, 13), width: 10, height: 10 })
+  const { job, item } = queueOne(key)
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'running' }, nextRetryAt: expect.any(Number),
+    finalBytes: null })
+  expect(store.get(key)?.bytes).toEqual(original)
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()).toMatchObject({
+    status: 'retry_wait', errorKind: 'transient', backupVerifiedAt: expect.any(String),
+    replacementAttemptedAt: expect.any(String),
+  })
+  getDatabase().update(optimizationItems).set({ nextAttemptAt: Date.now() - 1 }).where(eq(optimizationItems.id, item.id)).run()
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'completed' }, savedBytes: 30 })
+  expect(sourcePuts).toBe(2)
+  expect(store.get(key)?.bytes.length).toBe(70)
+})
+
+test('exhausts the application retry budget and reports completed_with_errors', async () => {
+  send.mockRejectedValue({ $metadata: { httpStatusCode: 503 } })
+  const { job, item } = queueOne('unavailable.jpg')
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) getDatabase().update(optimizationItems).set({ nextAttemptAt: Date.now() - 1 })
+      .where(eq(optimizationItems.id, item.id)).run()
+    await runNextJob()
+  }
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'completed_with_errors' }, failed: 1, needsAttention: 0 })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()).toMatchObject({
+    status: 'failed', errorKind: 'transient', attemptCount: 3, transientFailures: 3, nextAttemptAt: null,
+  })
+  expect(send).toHaveBeenCalledTimes(3)
+})
+
+test('pauses on credential failure and resumes from persisted state', async () => {
+  send.mockRejectedValue({ $metadata: { httpStatusCode: 403 }, name: 'AccessDenied' })
+  const { job, item } = queueOne('private.jpg')
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'paused', pauseReason: expect.stringContaining('credentials') },
+    failed: 0 })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()).toMatchObject({
+    status: 'pending', attemptCount: 1, errorKind: 'credentials',
+  })
+  workerLease.release()
+  closeDatabase()
+  send.mockResolvedValue({ ETag: '"changed"', ContentLength: 100, Metadata: {} })
+  resumeJob(job.id)
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'completed', pauseReason: null }, sourceChanged: 1 })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()?.attemptCount).toBe(2)
+})
+
+test('pauses a queued job when credentials are missing at restart', async () => {
+  const { job, item } = queueOne('missing-config.jpg')
+  configFailure.mockReturnValueOnce(new Error('R2 connection is not configured'))
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'paused', pauseReason: expect.stringContaining('credentials') } })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()?.attemptCount).toBe(0)
+  expect(send).not.toHaveBeenCalled()
+})
+
+test('pauses the job on a bucket-wide NoSuchBucket error', async () => {
+  send.mockRejectedValue({ name: 'NoSuchBucket', $metadata: { httpStatusCode: 404 } })
+  const { job, item } = queueOne('missing-bucket.jpg')
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'paused', pauseReason: expect.stringContaining('bucket') } })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()).toMatchObject({
+    status: 'pending', errorKind: 'bucket', attemptCount: 1,
+  })
+})
+
+test('records an invalid JPEG separately and completes the job with errors', async () => {
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) return { ETag: '"old"', ContentLength: 100, Metadata: {} }
+    if (command instanceof GetObjectCommand) return { ETag: '"old"', ContentLength: 100,
+      Body: { transformToByteArray: async () => Buffer.alloc(100, 1) } }
+    throw new Error('Invalid input must not be uploaded')
+  })
+  compress.mockRejectedValue(new InvalidJpegError())
+  const { job, item } = queueOne('broken.jpg')
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'completed_with_errors' }, invalidJpeg: 1, failed: 0 })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()).toMatchObject({
+    status: 'invalid_jpeg', errorKind: 'invalid_jpeg', attemptCount: 1,
+  })
+  expect(send.mock.calls.some(([command]) => command instanceof PutObjectCommand)).toBe(false)
+})
+
+test('treats a download 412 as a changed source before any backup or replacement', async () => {
+  send.mockImplementation(async (command: unknown) => {
+    if (command instanceof HeadObjectCommand) return { ETag: '"old"', ContentLength: 100, Metadata: {} }
+    if (command instanceof GetObjectCommand) throw { $metadata: { httpStatusCode: 412 } }
+    throw new Error('Changed source must not be uploaded')
+  })
+  const { job, item } = queueOne('changed-during-download.jpg')
+  await runNextJob()
+  expect(getJobSummary(job.id)).toMatchObject({ job: { status: 'completed' }, sourceChanged: 1,
+    finalBytes: null, savedBytes: null })
+  expect(getDatabase().select().from(optimizationItems).where(eq(optimizationItems.id, item.id)).get()).toMatchObject({
+    status: 'source_changed', errorKind: 'source_changed', attemptCount: 1,
+  })
+  expect(send.mock.calls.some(([command]) => command instanceof PutObjectCommand)).toBe(false)
 })
 
 test('continues after backup failure, replaces only after verified backup, and skips low savings', async () => {
@@ -155,7 +330,7 @@ test('selects only known, unoptimized JPEGs matching a literal prefix and size',
   expect(count).toBe(1)
   await runNextJob()
   expect(db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).all()).toMatchObject([
-    { key: 'photos/%-eligible.jpg', status: 'skipped', error: 'Object changed since the scan' },
+    { key: 'photos/%-eligible.jpg', status: 'source_changed', errorKind: 'source_changed', error: 'Object changed since the scan' },
   ])
   expect(send.mock.calls.some(([command]) => command instanceof PutObjectCommand)).toBe(false)
 })
@@ -246,7 +421,7 @@ test('marks a successful but temporarily unverifiable replacement for attention,
   let failVerificationHead = false
   send.mockImplementation(async (command: unknown) => {
     if (command instanceof HeadObjectCommand) {
-      if (failVerificationHead) { failVerificationHead = false; throw new Error('HEAD timed out') }
+      if (failVerificationHead) { failVerificationHead = false; throw new Error('Verification unavailable') }
       const value = store.get(command.input.Key!)!
       return { ContentLength: value.bytes.length, ETag: value.etag, Metadata: value.metadata }
     }
@@ -306,7 +481,7 @@ test('retries only after confirming the original and verified backup still match
     if (command instanceof PutObjectCommand) {
       const keyToWrite = command.input.Key!
       if (command.input.IfNoneMatch === '*' && store.has(keyToWrite)) throw { $metadata: { httpStatusCode: 412 } }
-      if (keyToWrite === key && ++sourcePuts === 1) throw new Error('PUT timed out before upload')
+      if (keyToWrite === key && ++sourcePuts === 1) throw new Error('PUT outcome unavailable')
       store.set(keyToWrite, { bytes: Buffer.from(command.input.Body as Buffer), etag: '"new"', metadata: command.input.Metadata ?? {} })
       return { ETag: '"new"' }
     }
@@ -365,7 +540,8 @@ test('accepts a matching preexisting backup but never overwrites a source change
     minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true })
   await runNextJob()
   const item = db.select().from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).get()
-  expect(item).toMatchObject({ status: 'needs_attention', error: expect.stringContaining('Source differs') })
+  expect(item).toMatchObject({ status: 'needs_attention', errorKind: 'source_changed',
+    error: expect.stringContaining('Source differs') })
   expect(item?.backupKey).toBeTruthy()
   expect(changed).toBe(true)
   expect(db.select().from(objects).where(eq(objects.key, key)).get()?.isOptimized).toBe(false)
