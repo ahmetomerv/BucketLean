@@ -39,6 +39,8 @@ curl --fail-with-body --user operator "$OPTIMIZER_URL/api/jobs/42"
 
 Do not make the job request immediately after the scan request: `202` only means it was queued. Check `scan.status` first. A job can end as `completed`, `completed_with_errors`, `paused`, or `needs_attention`; automation should report the last three for review. `sourceChanged` is a separate count, and final byte totals may be `null` when a source changed outside the job.
 
+After a successful job, verify representative images in any application serving or indexing the same bucket. The optimizer does not refresh that application's stored file sizes, thumbnails, or caches. If they remain stale, use the application's refresh, reindex, or reprocess action after checking its behavior. A ChronoFrame dashboard **Reprocess** refreshed stale displayed sizes in one verified run.
+
 If credentials or the bucket failed, correct the server configuration and call `POST /api/jobs/:id/resume`. If remote replacement state is uncertain, inspect the item's backup key, hashes, and error, then call `POST /api/jobs/:id/reconcile`. Avoid automatically repeating `POST /api/jobs` on a timeout: the first request may already have created a job. Use `GET /api/jobs?bucketId=photos` and the known job ID to check before retrying. The API has no idempotency-key feature yet.
 
 After reviewing job `42`, use only the action that matches its current status:

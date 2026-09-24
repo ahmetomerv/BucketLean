@@ -30,6 +30,7 @@ The static documentation site is a separate build and does not run scans or jobs
 2. Inspect the eligible count and object list. Files with unknown metadata or an existing `image-optimizer-version` marker are excluded.
 3. Create a job for that same prefix. Balanced quality 82 and a minimum 15% saving are the defaults. A verified original backup is mandatory before replacement. The optional deletion checkbox is off by default; selecting it removes the backup and manifest only after the optimized source is verified, so you lose that image's restore copy.
 4. Watch the job result. The worker processes one image at a time and verifies its backup and manifest before conditionally replacing the source.
+5. Check the images in any website or library that uses the bucket. Those applications may retain the old file size, thumbnails, or other indexed details because this tool writes directly to R2. Refresh or reprocess their records if needed, after checking what their action changes. In a ChronoFrame deployment, the dashboard's **Reprocess** action refreshed stale displayed image sizes after optimization.
 
 The same workflow is available through the [HTTP API](../api/index.md). Creating a job starts processing asynchronously and may replace qualifying originals, so inspect the scan first.
 
