@@ -90,7 +90,7 @@ Create a job from the selected bucket's latest **completed** scan. This operatio
 | --- | --- | --- | --- |
 | `bucketId` | configured profile ID | sole profile, if only one | Select a bucket. |
 | `prefix` | string, at most 1,024 characters | `""` | Literal source-key prefix within the completed scan. |
-| `minBytes` | nonnegative safe integer | `1048576` | Minimum original size in bytes. |
+| `minBytes` | nonnegative safe integer | `1048576` | Minimum original size in bytes. The dashboard's **Minimum original size (MiB)** control accepts 1–50 MiB and sends this value in bytes; the API can also accept 0. |
 | `preset` | `archival`, `balanced`, or `aggressive` | `balanced` | JPEG qualities 90, 82, or 72. |
 | `minimumSavingPercent` | integer from 1 to 99 | `15` | Required saving before replacement. |
 | `preserveMetadata` | boolean | `true` | Require selected EXIF/ICC data to survive optimization. |
