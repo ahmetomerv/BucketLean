@@ -59,6 +59,15 @@ try {
   const html = await page.text()
   if (!html.includes('>BucketLean</h1>')) throw new Error('Dashboard heading is missing')
   if (!html.includes('<title>BucketLean</title>')) throw new Error('Browser title is missing')
+  for (const file of ['bucketlean-logo.svg', 'favicon-32.png', 'apple-touch-icon.png']) {
+    if (!html.includes(`href="/${file}"`)) throw new Error(`Browser icon ${file} is missing from the page head`)
+    const icon = await request(`/${file}`)
+    assertStatus(icon, 200, `/${file}`)
+    const bytes = Buffer.from(await icon.arrayBuffer())
+    if (file.endsWith('.svg') ? !bytes.toString().includes('<svg') : !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error(`/${file} is not a valid ${file.endsWith('.svg') ? 'SVG' : 'PNG'}`)
+    }
+  }
   assertStatus(await request('/api/jobs', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify({ minimumSavingPercent: 0 }) }), 400, 'invalid /api/jobs')
   console.log('Production smoke check passed: health, auth, dashboard, and API validation')

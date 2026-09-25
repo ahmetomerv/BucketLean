@@ -5,6 +5,9 @@ hero:
   name: BucketLean
   text: Safely shrink JPEGs in your Cloudflare R2 bucket
   tagline: Self-hosted scans, verified originals, durable jobs, and a documented HTTP API.
+  image:
+    src: /bucketlean-logo.svg
+    alt: BucketLean bucket logo
   actions:
     - theme: brand
       text: Get started

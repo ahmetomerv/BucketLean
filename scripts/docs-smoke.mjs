@@ -55,7 +55,17 @@ try {
   if (!asset) throw new Error('Home page has no local static asset')
   const assetResponse = await fetch(`${origin}${asset}`)
   if (assetResponse.status !== 200) throw new Error(`${asset} returned ${assetResponse.status}`)
-  console.log(`Static docs smoke check passed at ${base}: ${pages.length} pages and an asset`)
+  for (const file of ['bucketlean-logo.svg', 'favicon-32.png', 'apple-touch-icon.png']) {
+    const iconPath = `${base}${file}`
+    if (!home.includes(iconPath)) throw new Error(`Home page does not reference ${iconPath}`)
+    const iconResponse = await fetch(`${origin}${iconPath}`)
+    if (iconResponse.status !== 200) throw new Error(`${iconPath} returned ${iconResponse.status}`)
+    const bytes = Buffer.from(await iconResponse.arrayBuffer())
+    if (file.endsWith('.svg') ? !bytes.toString().includes('<svg') : !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error(`${iconPath} is not a valid ${file.endsWith('.svg') ? 'SVG' : 'PNG'}`)
+    }
+  }
+  console.log(`Static docs smoke check passed at ${base}: ${pages.length} pages, an asset, and brand icons`)
 } finally {
   await new Promise(resolveClose => server.close(resolveClose))
 }

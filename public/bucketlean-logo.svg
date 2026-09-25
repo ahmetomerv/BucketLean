@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">BucketLean logo</title>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFB347"/>
+      <stop offset="0.42" stop-color="#F97316"/>
+      <stop offset="1" stop-color="#C2410C"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#EA580C"/>
+      <stop offset="1" stop-color="#9A3412"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#FFD18A"/>
+      <stop offset="1" stop-color="#FB923C"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-20%" width="150%" height="150%">
+      <feDropShadow dx="2" dy="5" stdDeviation="4" flood-color="#7C2D12" flood-opacity=".28"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <path d="M19 31h90l-10 69c-2 12-16 20-35 20s-33-8-35-20L19 31Z" fill="url(#body)"/>
+    <path d="M64 44h45l-10 56c-2 12-16 20-35 20V44Z" fill="url(#side)" opacity=".42"/>
+    <path d="M29 100c7 9 19 13 35 13s28-4 35-13c-2 12-16 20-35 20s-33-8-35-20Z" fill="#9A3412" opacity=".28"/>
+
+    <ellipse cx="64" cy="31" rx="45" ry="16" fill="url(#rim)"/>
+    <ellipse cx="64" cy="30" rx="36" ry="9" fill="#9A3412"/>
+    <ellipse cx="64" cy="28" rx="33" ry="6" fill="#C2410C"/>
+    <path d="M19 31c0 9 20 16 45 16s45-7 45-16" fill="none" stroke="#FFB85C" stroke-width="6" stroke-linecap="round"/>
+    <path d="M25 44l8 54" fill="none" stroke="#FFE0A3" stroke-width="3" stroke-linecap="round" opacity=".55"/>
+
+    <path d="M38 61h14c8 0 13 4 13 10 0 4-2 7-5 9 4 2 6 5 6 9 0 7-6 11-14 11H38V61Zm8 7v9h5c4 0 6-2 6-5s-2-4-6-4h-5Zm0 16v9h6c4 0 6-2 6-5s-2-4-6-4h-6ZM70 61h8v32h18v7H70V61Z" fill="#FFF7ED" fill-rule="evenodd"/>
+  </g>
+</svg>

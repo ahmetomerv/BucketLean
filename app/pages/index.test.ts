@@ -72,6 +72,8 @@ test('scan sends its prefix and refreshes the displayed results', async () => {
   setupData()
   const { wrapper, button, inputFor } = await renderPage()
   expect(wrapper.find('h1').text()).toBe('BucketLean')
+  expect(wrapper.find('header img').exists()).toBe(true)
+  expect(wrapper.find('header img').attributes('alt')).toBe('')
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await inputFor('Scan prefix').setValue('photos/test/')
   await button('Start scan').trigger('click')
