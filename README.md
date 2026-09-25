@@ -140,6 +140,8 @@ npm run check
 
 The suite covers the dashboard actions, HTTP authentication and validation, scan persistence and recovery, candidate filtering, image and metadata validation, backup and manifest verification, replacement reconciliation, durable retry deadlines and exhaustion, credential pause and resume, failure classification, multi-bucket isolation, worker lease takeover, and SQLite snapshots. Tests use temporary SQLite databases, local JPEG fixtures, and mocked R2 operations. They do not need R2 credentials or write to a real bucket. `npm run check` runs coverage, typechecking, an app build, production and development server smoke checks, plus the static docs build and dev-server smoke checks; GitHub Actions runs it on Node 22 and 24. The coverage gate catches large regressions, but a passing percentage alone does not prove every failure mode is covered.
 
+The test scripts run `nuxt prepare` first to generate the ignored `.nuxt/tsconfig.json` required by Vitest on a fresh checkout. This also applies when `npm run check` starts with coverage tests in CI.
+
 ### Performance baseline
 
 On a local synthetic scan with 5,000 eligible keys, job creation made **0 R2 requests**. A single run before batching took 146 ms and added about 25 MiB of JavaScript heap; a single run after batching took 107 ms and added about 19 MiB. These are indicative process measurements, not a throughput guarantee. Reproduce the job-creation measurement with `PERF_BENCH=1 npx vitest run server/utils/jobs.test.ts -t 'measures large job creation'`.
