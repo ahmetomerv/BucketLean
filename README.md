@@ -1,4 +1,4 @@
-# R2 JPEG Optimizer
+# BucketLean
 
 A private, self-hosted Nuxt application for finding and recompressing JPEGs in one or more Cloudflare R2 buckets. It uses one sequential worker, SQLite for persistent jobs, Sharp/MozJPEG for compression, and ExifTool to verify photo metadata.
 
@@ -16,7 +16,7 @@ npm run docs:check
 
 `docs:dev` serves the documentation at `http://localhost:5173/` by default. It is separate from the Nuxt app at `http://localhost:3000/`. `docs:preview` serves the built static site at `http://localhost:4173/` by default.
 
-Publish `docs/.vitepress/dist` with any static host. The default build uses `/` as its base; for a subpath, set a matching base during both build and verification, for example `DOCS_BASE=/r2-jpeg-optimizer/ npm run docs:check`. Use `npm run docs:preview` for a local preview. The site is not automatically deployed; [operations and recovery](docs/operations.md#build-and-publish-this-documentation) has the publishing details.
+Publish `docs/.vitepress/dist` with any static host. The default build uses `/` as its base; for a subpath, set a matching base during both build and verification, for example `DOCS_BASE=/bucketlean/ npm run docs:check`. Keep the existing base if the docs are already published at another path. Use `npm run docs:preview` for a local preview. The site is not automatically deployed; [operations and recovery](docs/operations.md#build-and-publish-this-documentation) has the publishing details.
 
 ## How it works
 
@@ -57,6 +57,8 @@ Each configured bucket has a stable profile ID. Scans, object keys, and jobs are
 The multi-bucket schema starts with a fresh SQLite database. Existing single-bucket databases are not migrated. Stop the app and remove the old database file before starting this version; retain an external snapshot first if you need its history. The app refuses a legacy schema so it cannot mistake old rows for another bucket.
 
 Optimized objects receive `image-optimizer-version`, `image-optimizer-quality`, `image-optimizer-date`, `image-optimizer-job-id`, `image-optimizer-item-id`, and `original-size` custom R2 metadata. They are excluded from future jobs. The manifest prefix is separate from `__optimizer/originals/`, so a lifecycle rule targeting only originals will not erase the key mapping. **Do not enable a backup expiration rule until you have exported a SQLite snapshot, verified the manifests, and completed a restore drill in your bucket.** An [R2 object lifecycle rule](https://developers.cloudflare.com/r2/buckets/object-lifecycles/) can later expire only the `__optimizer/originals/` prefix at a retention period you choose. The application does not automatically restore objects. By default it retains backups; the per-job opt-in cleanup removes a backup and its manifest only after verifying the optimized source.
+
+The BucketLean rename does not change existing data identifiers: the default SQLite filename remains `optimizer.sqlite`, backup keys remain under `__optimizer/`, optimized-object metadata still uses `image-optimizer-*`, and backup manifests still use format `r2-jpeg-optimizer-backup`. Keep these identifiers when reading existing jobs, backups, or optimized images.
 
 ### Backup recovery drill
 

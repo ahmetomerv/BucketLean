@@ -12,7 +12,7 @@ const port = await new Promise((resolve, reject) => {
     listener.close(() => resolve(selected))
   })
 })
-const dir = await mkdtemp(join(tmpdir(), 'r2-optimizer-dev-smoke-'))
+const dir = await mkdtemp(join(tmpdir(), 'bucketlean-dev-smoke-'))
 const child = spawn(process.execPath, ['node_modules/nuxt/bin/nuxt.mjs', 'dev', '--host', '127.0.0.1', '--port', String(port)], {
   env: { ...process.env, DATABASE_PATH: join(dir, 'optimizer.sqlite'), APP_PASSWORD: 'dev-smoke-password',
     R2_ENDPOINT: '', R2_BUCKET: '', R2_ACCESS_KEY_ID: '', R2_SECRET_ACCESS_KEY: '', R2_BUCKETS_JSON: '' },

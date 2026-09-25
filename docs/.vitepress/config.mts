@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
 
 export default withMermaid(defineConfig({
-  title: 'R2 JPEG Optimizer',
+  title: 'BucketLean',
   description: 'Self-hosted JPEG optimization for Cloudflare R2',
   base: process.env.DOCS_BASE || '/',
   vite: {
@@ -27,6 +27,6 @@ export default withMermaid(defineConfig({
       ] },
     ],
     search: { provider: 'local' },
-    footer: { message: 'R2 JPEG Optimizer is self-hosted software. The documentation site is static.' },
+    footer: { message: 'BucketLean is self-hosted software. The documentation site is static.' },
   },
 }))

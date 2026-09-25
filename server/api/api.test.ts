@@ -85,7 +85,7 @@ test('health is public while data endpoints require the password', async () => {
   expect(await health.json()).toMatchObject({ status: 'ok', database: 'ok' })
   const denied = await call('/api/objects', { authorized: false })
   expect(denied.status).toBe(401)
-  expect(denied.headers.get('www-authenticate')).toContain('Basic')
+  expect(denied.headers.get('www-authenticate')).toBe('Basic realm="BucketLean"')
   const allowed = await call('/api/objects')
   expect(allowed.status).toBe(200)
 })

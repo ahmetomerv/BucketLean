@@ -19,7 +19,7 @@ export async function downloadToTempFile(client: Pick<S3Client, 'send'>, bucket:
     throw new Error('Image exceeds 128 MiB safety limit')
   }
   if (!(Symbol.asyncIterator in result.Body)) throw new Error('R2 response body is not streamable')
-  const directory = await mkdtemp(join(options.temporaryDirectory ?? tmpdir(), 'r2-optimizer-download-'))
+  const directory = await mkdtemp(join(options.temporaryDirectory ?? tmpdir(), 'bucketlean-download-'))
   const path = join(directory, 'object')
   let size = 0
   const hash = createHash('sha256')

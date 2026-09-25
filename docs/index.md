@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: R2 JPEG Optimizer
+  name: BucketLean
   text: Safely shrink JPEGs in your Cloudflare R2 bucket
   tagline: Self-hosted scans, verified originals, durable jobs, and a documented HTTP API.
   actions:

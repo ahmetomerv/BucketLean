@@ -12,7 +12,7 @@ const port = await new Promise((resolve, reject) => {
     listener.close(() => resolve(address.port))
   })
 })
-const dir = await mkdtemp(join(tmpdir(), 'r2-optimizer-smoke-'))
+const dir = await mkdtemp(join(tmpdir(), 'bucketlean-smoke-'))
 const password = 'smoke-test-password'
 const authorization = `Basic ${Buffer.from(`tester:${password}`).toString('base64')}`
 const child = spawn(process.execPath, ['.output/server/index.mjs'], {
@@ -56,7 +56,9 @@ try {
   assertStatus(await request('/api/overview', { headers }), 200, '/api/overview')
   const page = await request('/', { headers })
   assertStatus(page, 200, '/')
-  if (!(await page.text()).includes('R2 JPEG Optimizer')) throw new Error('Dashboard title is missing')
+  const html = await page.text()
+  if (!html.includes('>BucketLean</h1>')) throw new Error('Dashboard heading is missing')
+  if (!html.includes('<title>BucketLean</title>')) throw new Error('Browser title is missing')
   assertStatus(await request('/api/jobs', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify({ minimumSavingPercent: 0 }) }), 400, 'invalid /api/jobs')
   console.log('Production smoke check passed: health, auth, dashboard, and API validation')

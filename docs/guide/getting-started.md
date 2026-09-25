@@ -1,6 +1,6 @@
 # Getting started
 
-R2 JPEG Optimizer runs as a private Node server connected to one or more R2 buckets. Its [documentation site](../index.md) is a separate static build; hosting the docs does not run the optimizer.
+BucketLean runs as a private Node server connected to one or more R2 buckets. Its [documentation site](../index.md) is a separate static build; hosting the docs does not run the app.
 
 ## Run the application locally
 

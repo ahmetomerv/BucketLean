@@ -108,7 +108,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
     <header class="mb-10 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <p class="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">Cloudflare R2 · JPEG optimization</p>
-        <h1 class="text-3xl font-semibold tracking-tight sm:text-4xl">R2 JPEG Optimizer</h1>
+        <h1 class="text-3xl font-semibold tracking-tight sm:text-4xl">BucketLean</h1>
         <p class="mt-2 max-w-2xl text-sm text-slate-600">Scan your bucket, review candidates, and run a sequential optimization job.</p>
       </div>
       <span class="w-fit rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800">One image at a time</span>

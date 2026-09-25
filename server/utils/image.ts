@@ -21,7 +21,7 @@ function sameTag(a: unknown, b: unknown) {
 }
 
 export async function optimizeImage(input: Buffer, preset: Preset, preserveMetadata: boolean) {
-  const dir = await mkdtemp(join(tmpdir(), 'r2-jpeg-'))
+  const dir = await mkdtemp(join(tmpdir(), 'bucketlean-image-'))
   try {
     const originalPath = join(dir, 'original.jpg')
     const optimizedPath = join(dir, 'optimized.jpg')

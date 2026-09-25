@@ -57,7 +57,7 @@ npm run docs:check
 `docs:build` writes static files to `docs/.vitepress/dist`. Publish the **contents** of that directory to a static host. For a root domain, build with the default `/` base. For a repository or other subpath, build with a matching base, for example:
 
 ```sh
-DOCS_BASE=/r2-jpeg-optimizer/ npm run docs:build
+DOCS_BASE=/bucketlean/ npm run docs:build
 ```
 
 Set the static host's published directory to `docs/.vitepress/dist` and serve directory indexes such as `api/index.html`. The docs site is public content; it contains examples and no runtime access to your bucket or app password. See the [VitePress deployment guide](https://vitepress.dev/guide/deploy) for host-specific settings. Publishing is a separate step; the repository does not automatically deploy the docs.

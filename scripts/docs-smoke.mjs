@@ -35,7 +35,7 @@ try {
   const address = server.address()
   const origin = `http://127.0.0.1:${address.port}`
   const pages = [
-    ['', 'R2 JPEG Optimizer'],
+    ['', 'BucketLean'],
     ['guide/getting-started.html', 'First safe run'],
     ['api/', 'HTTP API'],
     ['api/endpoints.html', 'Endpoint reference'],

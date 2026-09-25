@@ -23,7 +23,7 @@ import { workerLease } from './worker-lease'
 let dir: string
 const previous = { DATABASE_PATH: process.env.DATABASE_PATH, R2_ENDPOINT: process.env.R2_ENDPOINT, R2_BUCKET: process.env.R2_BUCKET, R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY }
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'r2-optimizer-test-'))
+  dir = mkdtempSync(join(tmpdir(), 'bucketlean-test-'))
   process.env.DATABASE_PATH = join(dir, 'test.sqlite')
   process.env.R2_ENDPOINT = 'https://example.r2.cloudflarestorage.com'
   process.env.R2_BUCKET = 'test'

@@ -1,6 +1,6 @@
 # Architecture overview
 
-R2 JPEG Optimizer is a self-hosted Nuxt application that scans one or more configured Cloudflare R2 buckets and conditionally replaces qualifying JPEGs with smaller, validated versions. The app keeps job progress in SQLite and, by default, the original image plus a restore manifest in R2. Optimization runs one item at a time.
+BucketLean is a self-hosted Nuxt application that scans one or more configured Cloudflare R2 buckets and conditionally replaces qualifying JPEGs with smaller, validated versions. The app keeps job progress in SQLite and, by default, the original image plus a restore manifest in R2. Optimization runs one item at a time.
 
 ## System map
 
@@ -154,6 +154,8 @@ __optimizer/manifests/42/eae9ac1fd7359a317d865777c97061a12971b6efe8790645add9355
 ```
 
 The JSON manifest records the bucket, job and item IDs, original key and ETag, backup key, original byte length and SHA-256, object headers, custom metadata, and creation time. Its key mapping is readable directly from R2 if SQLite is lost. The backup key hash is derived from the **source key**; the `sha256` inside the manifest is the hash of the **original bytes**.
+
+The manifest format and `__optimizer/` keys retain their original identifiers after the BucketLean rename so existing backups remain readable. The same applies to `image-optimizer-*` object metadata and the default `optimizer.sqlite` database filename.
 
 For example, an illustrative manifest body looks like this (the byte hash and ETag below are placeholders):
 

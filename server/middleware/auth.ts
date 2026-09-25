@@ -15,6 +15,6 @@ export default defineEventHandler((event) => {
   const a = Buffer.from(received)
   const b = Buffer.from(password)
   if (a.length === b.length && timingSafeEqual(a, b)) return
-  setHeader(event, 'WWW-Authenticate', 'Basic realm="R2 JPEG Optimizer"')
+  setHeader(event, 'WWW-Authenticate', 'Basic realm="BucketLean"')
   throw createError({ statusCode: 401, statusMessage: 'Authentication required' })
 })

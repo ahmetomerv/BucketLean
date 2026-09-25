@@ -1,6 +1,6 @@
 # HTTP API
 
-The dashboard uses the same JSON API described here. The API is served by the running optimizer app; the [VitePress documentation site](../index.md) is static and does not proxy requests or connect to R2.
+The dashboard uses the same JSON API described here. The API is served by the running BucketLean app; the [VitePress documentation site](../index.md) is static and does not proxy requests or connect to R2.
 
 ## Base URL and authentication
 
