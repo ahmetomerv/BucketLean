@@ -54,6 +54,8 @@ npm run docs:check
 
 `docs:dev` starts at `http://localhost:5173/` by default. `docs:preview` serves the built site at `http://localhost:4173/`. `docs:check` verifies the static pages and assets, then starts a temporary dev server to check Mermaid's browser dependencies.
 
+The docs have their own `docs/tsconfig.json`, so these commands work in a fresh checkout after `npm ci`. They do not require Nuxt's generated `.nuxt/tsconfig.json` or an R2 environment file.
+
 `docs:build` writes static files to `docs/.vitepress/dist`. Publish the **contents** of that directory to a static host. For a root domain, build with the default `/` base. For a repository or other subpath, build with a matching base, for example:
 
 ```sh

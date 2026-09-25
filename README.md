@@ -16,7 +16,7 @@ npm run docs:check
 
 `docs:dev` serves the documentation at `http://localhost:5173/` by default. It is separate from the Nuxt app at `http://localhost:3000/`. `docs:preview` serves the built static site at `http://localhost:4173/` by default.
 
-Publish `docs/.vitepress/dist` with any static host. The default build uses `/` as its base; for a subpath, set a matching base during both build and verification, for example `DOCS_BASE=/BucketLean/ npm run docs:check`. Use `npm run docs:preview` for a local preview. The [GitHub Pages workflow](.github/workflows/pages.yml) builds and publishes the site at `https://ahmetomerv.github.io/BucketLean/` when the repository's Pages **Source** is set to **GitHub Actions**. Selecting `main` and `/docs` as a branch source serves the Markdown files instead of the VitePress build. See [operations and recovery](docs/operations.md#build-and-publish-this-documentation) for publishing details.
+Publish `docs/.vitepress/dist` with any static host. The default build uses `/` as its base; for a subpath, set a matching base during both build and verification, for example `DOCS_BASE=/BucketLean/ npm run docs:check`. The docs build works after `npm ci` without running `nuxt prepare`. Use `npm run docs:preview` for a local preview. The [GitHub Pages workflow](.github/workflows/pages.yml) builds and publishes the site at `https://ahmetomerv.github.io/BucketLean/` when the repository's Pages **Source** is set to **GitHub Actions**. Selecting `main` and `/docs` as a branch source serves the Markdown files instead of the VitePress build. See [operations and recovery](docs/operations.md#build-and-publish-this-documentation) for publishing details.
 
 ## How it works
 
