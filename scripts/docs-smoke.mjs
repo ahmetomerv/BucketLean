@@ -51,6 +51,7 @@ try {
     if (!html.includes(expected)) throw new Error(`${base}${page} is missing ${expected}`)
     if (!page) home = html
   }
+  if (!home.includes('href="https://github.com/ahmetomerv/BucketLean"')) throw new Error('Docs navigation is missing the GitHub repository link')
   const asset = home.match(new RegExp(`(?:href|src)="(${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}assets/[^"#?]+)`))?.[1]
   if (!asset) throw new Error('Home page has no local static asset')
   const assetResponse = await fetch(`${origin}${asset}`)

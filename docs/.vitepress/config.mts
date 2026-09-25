@@ -22,6 +22,7 @@ export default withMermaid(defineConfig({
       { text: 'API', link: '/api/' },
       { text: 'Architecture', link: '/architecture' },
     ],
+    socialLinks: [{ icon: 'github', link: 'https://github.com/ahmetomerv/BucketLean' }],
     sidebar: [
       { text: 'Guide', items: [
         { text: 'Getting started', link: '/guide/getting-started' },
