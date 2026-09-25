@@ -57,7 +57,13 @@ npm run docs:check
 `docs:build` writes static files to `docs/.vitepress/dist`. Publish the **contents** of that directory to a static host. For a root domain, build with the default `/` base. For a repository or other subpath, build with a matching base, for example:
 
 ```sh
-DOCS_BASE=/bucketlean/ npm run docs:build
+DOCS_BASE=/BucketLean/ npm run docs:build
 ```
 
-Set the static host's published directory to `docs/.vitepress/dist` and serve directory indexes such as `api/index.html`. The docs site is public content; it contains examples and no runtime access to your bucket or app password. See the [VitePress deployment guide](https://vitepress.dev/guide/deploy) for host-specific settings. Publishing is a separate step; the repository does not automatically deploy the docs.
+For other static hosts, publish `docs/.vitepress/dist` and serve directory indexes such as `api/index.html`. The docs site is public content; it contains examples and no runtime access to your bucket or app password. See the [VitePress deployment guide](https://vitepress.dev/guide/deploy) for host-specific settings.
+
+### GitHub Pages for this repository
+
+The [Pages workflow](https://github.com/ahmetomerv/BucketLean/blob/main/.github/workflows/pages.yml) builds with `DOCS_BASE=/BucketLean/`, verifies the generated pages, and deploys `docs/.vitepress/dist` on pushes to `main` or by manual dispatch. In the repository's **Settings → Pages → Build and deployment**, set **Source** to **GitHub Actions**. Then push the workflow to `main` or run **Deploy documentation** from the Actions tab. The site will be served at `https://ahmetomerv.github.io/BucketLean/` after the deployment succeeds.
+
+Do not select **Deploy from a branch → main → /docs** for this VitePress site. That setting publishes the Markdown source in `/docs` and does not run `npm run docs:build`.

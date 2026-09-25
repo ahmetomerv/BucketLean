@@ -24,6 +24,8 @@ const port = await new Promise((resolvePort, reject) => {
   })
 })
 const origin = `http://127.0.0.1:${port}`
+const base = process.env.DOCS_BASE || '/'
+if (!base.startsWith('/') || !base.endsWith('/')) throw new Error('DOCS_BASE must start and end with /')
 const child = spawn(process.execPath, ['node_modules/vitepress/bin/vitepress.js', 'dev', 'docs', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
   stdio: ['ignore', 'pipe', 'pipe'],
 })
@@ -35,20 +37,21 @@ try {
   while (true) {
     if (child.exitCode !== null) throw new Error(`VitePress exited early: ${output}`)
     try {
-      const response = await fetch(`${origin}/`)
+      const response = await fetch(`${origin}${base}`)
       if (response.ok) break
     } catch { /* server still starting */ }
     if (Date.now() > deadline) throw new Error(`VitePress did not start: ${output}`)
     await new Promise(resolveDelay => setTimeout(resolveDelay, 100))
   }
 
-  const response = await fetch(`${origin}/@fs${mermaidChunk}`)
+  const response = await fetch(`${origin}${base}@fs${mermaidChunk}`)
   if (!response.ok) throw new Error(`Mermaid dev module returned ${response.status}`)
   const source = await response.text()
+  const importSource = source.replaceAll(`${base}.vitepress/cache/deps/`, '/.vitepress/cache/deps/')
   for (const dependency of ['fastdom.js', 'fastdom_extensions_fastdom-promised__js.js']) {
-    const path = source.match(new RegExp(`"(/\\.vitepress/cache/deps/${dependency.replaceAll('.', '\\.')}\\?[^\"]+)"`))?.[1]
+    const path = importSource.match(new RegExp(`"(/\\.vitepress/cache/deps/${dependency.replaceAll('.', '\\.')}\\?[^\"]+)"`))?.[1]
     if (!path) throw new Error(`${dependency} was not prebundled for the dev browser`)
-    const bundled = await fetch(`${origin}${path}`)
+    const bundled = await fetch(`${origin}${base.slice(0, -1)}${path}`)
     if (!bundled.ok || !(await bundled.text()).includes('export')) throw new Error(`${dependency} has no usable browser module`)
   }
   console.log('VitePress dev smoke check passed: Mermaid CommonJS dependencies are prebundled')
