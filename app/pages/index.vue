@@ -151,7 +151,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
     </header>
 
     <section class="mb-6 rounded-xs border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto] lg:items-end">
+      <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)] lg:items-end">
         <label class="min-w-0 text-sm font-medium text-slate-700">R2 bucket
           <select v-model="bucketId" :disabled="busy || !bucketResult.buckets.length" class="mt-2 block w-full rounded-xs border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-orange-600">
             <option v-for="bucket in bucketResult.buckets" :key="bucket.id" :value="bucket.id">{{ bucket.bucket }} · {{ bucket.id }}</option>
@@ -160,7 +160,6 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         <label class="min-w-0 text-sm font-medium text-slate-700">Scan prefix
           <input v-model="scanPrefix" :disabled="!bucketId || scanning || jobActive" type="text" placeholder="Leave empty for entire bucket" class="mt-2 w-full rounded-xs border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-orange-600">
         </label>
-        <button :disabled="!bucketId || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan">{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
       </div>
       <p v-if="!bucketResult.buckets.length" class="mt-2 text-sm text-amber-700">Configure an R2 bucket on the server before scanning.</p>
       <p v-else class="mt-2 text-xs text-slate-500">Each bucket keeps separate scan results and jobs. The worker processes one operation at a time across the service.</p>
@@ -173,6 +172,9 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         <span v-if="overview.scan.metadataErrorCount" class="text-amber-700">{{ number.format(overview.scan.metadataErrorCount) }} metadata checks failed</span>
       </div>
       <p v-if="overview.scan?.bucketId === bucketId && overview.scan.error" class="mt-3 text-sm text-red-700">{{ overview.scan.error }}</p>
+      <div class="mt-5 flex justify-center border-t border-slate-100 pt-4">
+        <button :disabled="!bucketId || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan">{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
+      </div>
     </section>
 
     <section class="mb-8 rounded-xs border border-slate-200 bg-white p-5 shadow-sm">
@@ -194,7 +196,6 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       <div class="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
         <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="acknowledged" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> I understand qualifying originals will be replaced after backup.</label>
         <strong class="text-sm text-slate-900" role="status">{{ number.format(selectedKeys.length) }} selected for this job</strong>
-        <button :disabled="!bucketId || !acknowledged || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
       </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
       <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">
@@ -213,6 +214,9 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
           <button :disabled="busy" class="mt-2 rounded bg-amber-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50" @click="resumeJob">{{ busy ? 'Resuming…' : 'Resume job' }}</button>
         </div>
         <p class="mt-1 text-xs text-slate-500">Backups: <code>__optimizer/originals/{{ currentJob.job.id }}/</code></p>
+      </div>
+      <div class="mt-5 flex justify-center border-t border-slate-100 pt-4">
+        <button :disabled="!bucketId || !acknowledged || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
       </div>
     </section>
 

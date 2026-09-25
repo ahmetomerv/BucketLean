@@ -78,6 +78,8 @@ test('scan sends its prefix and refreshes the displayed results', async () => {
   const scanSection = wrapper.findAll('section').find(section => section.text().includes('Start scan'))
   expect(scanSection?.text()).toContain('R2 bucket')
   expect(scanSection?.text()).toContain('Scan prefix')
+  expect(scanSection?.element.lastElementChild?.classList.contains('justify-center')).toBe(true)
+  expect(scanSection?.element.lastElementChild?.querySelector('button')?.textContent).toContain('Start scan')
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await inputFor('Scan prefix').setValue('photos/test/')
   await button('Start scan').trigger('click')
@@ -94,6 +96,8 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   expect(wrapper.text()).not.toContain('Back up originals (required)')
   expect(wrapper.text()).toContain('Each original is backed up before replacement.')
   const jobSection = wrapper.findAll('section').find(section => section.find('h2').exists() && section.find('h2').text() === 'Optimize eligible JPEGs')
+  expect(jobSection?.element.lastElementChild?.classList.contains('justify-center')).toBe(true)
+  expect(jobSection?.element.lastElementChild?.querySelector('button')?.textContent).toContain('Start job')
   const scanCheckbox = wrapper.find('input[aria-label="Select photos/one.jpg"]')
   for (const label of ['Preserve photo metadata', 'Delete the original backup', 'I understand']) {
     const checkbox = inputFor(label)
