@@ -32,6 +32,6 @@ function togglePreview() {
       <span v-else-if="failed">Unavailable</span>
       <span v-else-if="!loaded">Loading…</span>
     </div>
-    <button type="button" class="text-xs font-medium text-emerald-700 underline-offset-2 hover:underline" :aria-label="`${failed ? 'Retry' : requested ? 'Hide' : 'Show'} preview of ${object.key}`" @click="togglePreview">{{ failed ? 'Retry' : requested ? 'Hide' : 'Show' }} preview</button>
+    <button type="button" class="text-xs font-medium text-orange-700 underline-offset-2 hover:underline" :aria-label="`${failed ? 'Retry' : requested ? 'Hide' : 'Show'} preview of ${object.key}`" @click="togglePreview">{{ failed ? 'Retry' : requested ? 'Hide' : 'Show' }} preview</button>
   </div>
 </template>
