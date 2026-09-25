@@ -26,7 +26,7 @@ The static documentation site is a separate build and does not run scans or jobs
 
 ## First safe run
 
-1. Select a bucket, then scan a narrow prefix containing one or two known JPEGs. Scanning reads R2 but does not change objects.
+1. In the combined bucket and scan panel, select a bucket and enter a narrow scan prefix containing one or two known JPEGs, then start the scan. Scanning reads R2 but does not change objects.
 2. In **Optimize eligible JPEGs**, set the key prefix and **Minimum original size (MiB)**, then inspect the eligible count and object list. The default is 1 MiB. Choose the 3, 5, or 8 MiB preset, or enter any value from 1 to 50 MiB, including decimals. In **Scan results**, check the objects you want, click an eligible row, or press **Select eligible on this page**. The selected count is shown beside **Start job**. Use **Show preview** in the last column to load a small thumbnail without changing the selection; previews are read-only and downloaded on demand. Selections persist across pages and are cleared when you change bucket, scan, prefix, size, or status. Up to 5,000 may be selected. Already optimized objects and objects with unknown metadata cannot be selected.
 3. Create a job for the selected objects. Balanced quality 82 and a minimum 15% saving are the defaults. A verified original backup is mandatory before replacement. The optional deletion checkbox is off by default; selecting it removes the backup and manifest only after the optimized source is verified, so you lose that image's restore copy.
 4. Watch the job result. The worker processes one image at a time and verifies its backup and manifest before conditionally replacing the source.

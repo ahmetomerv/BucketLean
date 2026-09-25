@@ -152,22 +152,19 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
     </header>
 
     <section class="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <label class="block max-w-xl text-sm font-medium text-slate-700">R2 bucket
-        <select v-model="bucketId" :disabled="busy || !bucketResult.buckets.length" class="mt-2 block w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-600">
-          <option v-for="bucket in bucketResult.buckets" :key="bucket.id" :value="bucket.id">{{ bucket.bucket }} · {{ bucket.id }}</option>
-        </select>
-      </label>
-      <p v-if="!bucketResult.buckets.length" class="mt-2 text-sm text-amber-700">Configure an R2 bucket on the server before scanning.</p>
-      <p v-else class="mt-2 text-xs text-slate-500">Each bucket keeps separate scan results and jobs. The worker processes one operation at a time across the service.</p>
-    </section>
-
-    <section class="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="flex flex-col gap-4 lg:flex-row lg:items-end">
-        <label class="flex-1 text-sm font-medium text-slate-700">Scan prefix
+      <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto] lg:items-end">
+        <label class="min-w-0 text-sm font-medium text-slate-700">R2 bucket
+          <select v-model="bucketId" :disabled="busy || !bucketResult.buckets.length" class="mt-2 block w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-600">
+            <option v-for="bucket in bucketResult.buckets" :key="bucket.id" :value="bucket.id">{{ bucket.bucket }} · {{ bucket.id }}</option>
+          </select>
+        </label>
+        <label class="min-w-0 text-sm font-medium text-slate-700">Scan prefix
           <input v-model="scanPrefix" :disabled="!bucketId || scanning || jobActive" type="text" placeholder="Leave empty for entire bucket" class="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-600">
         </label>
         <button :disabled="!bucketId || scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan">{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
       </div>
+      <p v-if="!bucketResult.buckets.length" class="mt-2 text-sm text-amber-700">Configure an R2 bucket on the server before scanning.</p>
+      <p v-else class="mt-2 text-xs text-slate-500">Each bucket keeps separate scan results and jobs. The worker processes one operation at a time across the service.</p>
       <p v-if="actionError" class="mt-3 text-sm text-red-700">{{ actionError }}</p>
       <div v-if="overview.scan?.bucketId === bucketId" class="mt-4 flex flex-wrap gap-x-6 gap-y-1 border-t border-slate-100 pt-4 text-sm text-slate-600">
         <span>Status: <strong class="capitalize text-slate-900">{{ overview.scan.status }}</strong></span>
