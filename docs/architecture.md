@@ -8,6 +8,11 @@ BucketLean is a self-hosted Nuxt application that scans one or more configured C
 flowchart LR
     User[Browser] -->|Basic auth, except health| API[Nuxt dashboard and API]
     API -->|create scans and jobs; read results| DB[(SQLite on local persistent volume)]
+    API --> Preview[Read-only thumbnail endpoint]
+    Preview -->|check latest scan and ETag| DB
+    Preview -->|conditional GetObject on demand| R2
+    Preview -->|capped download| Temp[(System temporary files)]
+    Preview -->|72 px JPEG| Thumbnailer[Sharp thumbnail]
     Plugin[Nitro worker plugin] -->|poll every 2 seconds| DB
     Plugin --> Scanner[Scan worker]
     Plugin --> Optimizer[Optimization worker]
@@ -15,7 +20,7 @@ flowchart LR
     Scanner -->|save discovery and cursor| DB
     Optimizer -->|claim and renew lease; save item steps| DB
     Optimizer -->|Head, Get, conditional Put| R2
-    Optimizer -->|capped downloads| Temp[(System temporary files)]
+    Optimizer -->|capped downloads| Temp
     Optimizer --> Sharp[Sharp / MozJPEG]
     Optimizer --> ExifTool[ExifTool]
     Scripts[Recovery scripts] -->|consistent snapshot| DB
@@ -25,6 +30,7 @@ flowchart LR
 | Component | Responsibility | Main code |
 | --- | --- | --- |
 | Dashboard and API | Authenticate, validate input, display scan and job results, enqueue work | `app/pages/index.vue`, `server/api/`, `server/middleware/auth.ts` |
+| Thumbnail preview | On request, verify a listed JPEG, conditionally read it, and return a small JPEG without any R2 write | `app/components/ObjectPreview.vue`, `server/api/objects/preview.get.ts` |
 | Scan worker | Discover keys, identify JPEGs, inspect optimizer metadata, persist a resumable cursor | `server/utils/scanner.ts` |
 | Optimization worker | Process one item at a time, save intent and verification steps, classify failures, reconcile uncertain writes | `server/utils/jobs.ts` |
 | Image pipeline | Decode and validate JPEGs, recompress, check dimensions and selected EXIF/ICC metadata | `server/utils/image.ts` |

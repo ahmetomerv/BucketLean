@@ -78,7 +78,17 @@ List JPEG discovery rows from the latest scan, sorted by key. Query parameters:
 | `status` | `all`, `optimized`, `not_optimized`, or `unknown` | `all` | Filter by optimizer/metadata state. |
 | `page` | positive safe integer | `1` | One-based page number. |
 
-Returns `200` with `{ "items": [...], "total": 25, "page": 1, "pageSize": 100 }`. Each item includes its `key`, `etag`, `size`, `isJpeg`, `isOptimized`, `metadataStatus`, and `metadataError`. `total` is the count **after** filters. The endpoint lists JPEGs only. `status=all` includes JPEGs with unknown metadata; `status=not_optimized` includes only confirmed unoptimized JPEGs. Use `status=unknown` to inspect metadata failures, which cannot enter a job.
+Returns `200` with `{ "items": [...], "total": 25, "page": 1, "pageSize": 100 }`. Each item includes its `scanId`, `key`, `etag`, `size`, `isJpeg`, `isOptimized`, `metadataStatus`, and `metadataError`. `total` is the count **after** filters. The endpoint lists JPEGs only. `status=all` includes JPEGs with unknown metadata; `status=not_optimized` includes only confirmed unoptimized JPEGs. Use `status=unknown` to inspect metadata failures, which cannot enter a job.
+
+### `GET /api/objects/preview`
+
+Return a small JPEG thumbnail for one listed object. The dashboard requests it only when **Show preview** is pressed. Pass the `bucketId`, `key`, and `scanId` from the selected `GET /api/objects` item:
+
+```text
+GET /api/objects/preview?bucketId=photos&key=photos%2F2026%2Fportrait.jpg&scanId=7
+```
+
+The route requires app authentication, confirms the JPEG belongs to the latest scan, and downloads it from R2 with the scanned ETag as a condition. It streams the original to a temporary file with a 128 MiB limit, creates a thumbnail no larger than 72 × 72 pixels, and deletes the temporary file. It never writes to R2 or returns the original image. A preview is a visual aid; the optimization job still checks the source again before replacement. Up to two previews run concurrently. A changed or stale scan returns `409`, a missing file returns `404`, an oversized file returns `413`, an invalid JPEG returns `422`, and a busy preview service returns `429`. Each requested preview costs one R2 object read.
 
 ## Jobs
 
