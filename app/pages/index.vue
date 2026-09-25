@@ -150,17 +150,17 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       </div>
     </header>
 
-    <section class="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+    <section class="mb-6 rounded-xs border border-slate-200 bg-white p-5 shadow-sm">
       <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto] lg:items-end">
         <label class="min-w-0 text-sm font-medium text-slate-700">R2 bucket
-          <select v-model="bucketId" :disabled="busy || !bucketResult.buckets.length" class="mt-2 block w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-orange-600">
+          <select v-model="bucketId" :disabled="busy || !bucketResult.buckets.length" class="mt-2 block w-full rounded-xs border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-orange-600">
             <option v-for="bucket in bucketResult.buckets" :key="bucket.id" :value="bucket.id">{{ bucket.bucket }} · {{ bucket.id }}</option>
           </select>
         </label>
         <label class="min-w-0 text-sm font-medium text-slate-700">Scan prefix
-          <input v-model="scanPrefix" :disabled="!bucketId || scanning || jobActive" type="text" placeholder="Leave empty for entire bucket" class="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-orange-600">
+          <input v-model="scanPrefix" :disabled="!bucketId || scanning || jobActive" type="text" placeholder="Leave empty for entire bucket" class="mt-2 w-full rounded-xs border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-orange-600">
         </label>
-        <button :disabled="!bucketId || scanning || jobActive || busy" class="rounded-lg bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan">{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
+        <button :disabled="!bucketId || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan">{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
       </div>
       <p v-if="!bucketResult.buckets.length" class="mt-2 text-sm text-amber-700">Configure an R2 bucket on the server before scanning.</p>
       <p v-else class="mt-2 text-xs text-slate-500">Each bucket keeps separate scan results and jobs. The worker processes one operation at a time across the service.</p>
@@ -175,26 +175,26 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       <p v-if="overview.scan?.bucketId === bucketId && overview.scan.error" class="mt-3 text-sm text-red-700">{{ overview.scan.error }}</p>
     </section>
 
-    <section class="mb-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+    <section class="mb-8 rounded-xs border border-slate-200 bg-white p-5 shadow-sm">
       <div class="mb-4"><h2 class="text-lg font-semibold">Optimize eligible JPEGs</h2><p class="mt-1 text-sm text-slate-600">Use the prefix and minimum size to find candidates, then select the JPEGs to optimize in Scan results. Already optimized and unknown objects cannot be selected. Each original is backed up before replacement.</p></div>
       <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <label class="text-xs font-medium text-slate-600">Key prefix<input v-model="prefix" type="text" placeholder="photos/" class="mt-1 block w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm"></label>
+        <label class="text-xs font-medium text-slate-600">Key prefix<input v-model="prefix" type="text" placeholder="photos/" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"></label>
         <div>
-          <label class="text-xs font-medium text-slate-600">Minimum original size (MiB)<input v-model.number="minMiB" type="number" min="1" max="50" step="any" :aria-invalid="!minimumSizeValid" aria-describedby="minimum-size-help" class="mt-1 block w-full rounded-lg border px-2.5 py-2 text-sm" :class="minimumSizeValid ? 'border-slate-300' : 'border-red-400'"></label>
+          <label class="text-xs font-medium text-slate-600">Minimum original size (MiB)<input v-model.number="minMiB" type="number" min="1" max="50" step="any" :aria-invalid="!minimumSizeValid" aria-describedby="minimum-size-help" class="mt-1 block w-full rounded-xs border px-2.5 py-2 text-sm" :class="minimumSizeValid ? 'border-slate-300' : 'border-red-400'"></label>
           <div class="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Minimum original size presets">
-            <button v-for="size in [3, 5, 8]" :key="size" type="button" :aria-pressed="minMiB === size" class="rounded-md border px-2.5 py-1 text-xs font-medium" :class="minMiB === size ? 'border-orange-700 bg-orange-50 text-orange-800' : 'border-slate-300 text-slate-600 hover:border-orange-500'" @click="minMiB = size">{{ size }} MiB</button>
+            <button v-for="size in [3, 5, 8]" :key="size" type="button" :aria-pressed="minMiB === size" class="rounded-xs border px-2.5 py-1 text-xs font-medium" :class="minMiB === size ? 'border-orange-700 bg-orange-50 text-orange-800' : 'border-slate-300 text-slate-600 hover:border-orange-500'" @click="minMiB = size">{{ size }} MiB</button>
           </div>
         </div>
-        <label class="text-xs font-medium text-slate-600">JPEG preset<select v-model="preset" :disabled="jobActive" class="mt-1 block w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm"><option value="archival">Archival · quality 90</option><option value="balanced">Balanced · quality 82</option><option value="aggressive">Aggressive · quality 72</option></select></label>
-        <label class="text-xs font-medium text-slate-600">Minimum saving (%)<input v-model.number="minimumSavingPercent" :disabled="jobActive" type="number" min="1" max="99" step="1" class="mt-1 block w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm"></label>
+        <label class="text-xs font-medium text-slate-600">JPEG preset<select v-model="preset" :disabled="jobActive" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"><option value="archival">Archival · quality 90</option><option value="balanced">Balanced · quality 82</option><option value="aggressive">Aggressive · quality 72</option></select></label>
+        <label class="text-xs font-medium text-slate-600">Minimum saving (%)<input v-model.number="minimumSavingPercent" :disabled="jobActive" type="number" min="1" max="99" step="1" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"></label>
       </div>
       <p id="minimum-size-help" class="mt-2 text-xs" :class="minimumSizeValid ? 'text-slate-500' : 'text-red-700'">{{ minimumSizeValid ? 'Default: 1 MiB. Choose 3, 5, or 8 MiB, or enter any value from 1 to 50 MiB. The eligible count and scan results below use this size.' : 'Enter a minimum original size from 1 to 50 MiB before starting a job.' }}</p>
-      <label class="mt-4 flex items-center gap-2 text-sm text-slate-700"><input v-model="preserveMetadata" :disabled="jobActive" type="checkbox"> Preserve photo metadata</label>
-      <label class="mt-4 flex items-start gap-2 text-sm text-slate-700"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="mt-1"> Delete the original backup after successful optimization. The optimized image stays at its original key; deleting the backup removes the restore copy.</label>
+      <label class="mt-4 flex items-center gap-2 text-sm text-slate-700"><input v-model="preserveMetadata" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> Preserve photo metadata</label>
+      <label class="mt-4 flex items-start gap-2 text-sm text-slate-700"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="mt-1 h-5 w-5 cursor-pointer accent-orange-600"> Delete the original backup after successful optimization. The optimized image stays at its original key; deleting the backup removes the restore copy.</label>
       <div class="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
-        <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="acknowledged" :disabled="jobActive" type="checkbox"> I understand qualifying originals will be replaced after backup.</label>
+        <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="acknowledged" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> I understand qualifying originals will be replaced after backup.</label>
         <strong class="text-sm text-slate-900" role="status">{{ number.format(selectedKeys.length) }} selected for this job</strong>
-        <button :disabled="!bucketId || !acknowledged || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-lg bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
+        <button :disabled="!bucketId || !acknowledged || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
       </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
       <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">
@@ -204,11 +204,11 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         <p v-if="currentJob.nextRetryAt" class="mt-1 text-xs text-slate-600">Next retry: {{ formatDate(new Date(currentJob.nextRetryAt).toISOString()) }}</p>
         <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div class="h-full bg-orange-600" :style="{ width: `${currentJob.total ? 100 * (currentJob.completed + currentJob.skipped + currentJob.sourceChanged + currentJob.invalidJpeg + currentJob.failed + currentJob.needsAttention) / currentJob.total : 0}%` }"></div></div>
         <p class="mt-3 text-sm text-slate-700">Original {{ formatBytes(currentJob.originalBytes) }} · Final {{ currentJob.finalBytes == null ? currentJob.needsAttention ? 'Pending verification' : 'Unknown after source change' : formatBytes(currentJob.finalBytes) }} · Saved {{ currentJob.savedBytes == null ? currentJob.needsAttention ? 'Pending verification' : 'Unknown after source change' : `${formatBytes(currentJob.savedBytes)} (${currentJob.savedPercent}%)` }}</p>
-        <div v-if="currentJob.job.status === 'needs_attention'" class="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+        <div v-if="currentJob.job.status === 'needs_attention'" class="mt-3 rounded-xs border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
           <p>R2 did not confirm the source or backup state of {{ number.format(currentJob.needsAttention) }} item(s). Review the item errors in <code>/api/jobs/{{ currentJob.job.id }}</code>, then recheck the source and backup before retrying.</p>
           <button :disabled="busy" class="mt-2 rounded bg-amber-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50" @click="recheckJob">{{ busy ? 'Rechecking…' : 'Recheck remote state' }}</button>
         </div>
-        <div v-if="currentJob.job.status === 'paused'" class="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+        <div v-if="currentJob.job.status === 'paused'" class="mt-3 rounded-xs border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
           <p>Job paused after a bucket or credential error: {{ currentJob.job.pauseReason }}. Fix the R2 configuration or access, then resume.</p>
           <button :disabled="busy" class="mt-2 rounded bg-amber-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50" @click="resumeJob">{{ busy ? 'Resuming…' : 'Resume job' }}</button>
         </div>
@@ -223,18 +223,18 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         ['JPEG storage', formatBytes(overview.totals.jpegBytes)],
         ['Already optimized', number.format(overview.totals.optimized)],
         ['Eligible', number.format(overview.totals.eligible)],
-      ]" :key="card[0]" class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      ]" :key="card[0]" class="rounded-xs border border-slate-200 bg-white p-4 shadow-sm">
         <p class="text-xs font-medium text-slate-500">{{ card[0] }}</p><p class="mt-2 text-2xl font-semibold tabular-nums">{{ card[1] }}</p>
       </div>
     </section>
 
-    <section class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+    <section class="overflow-hidden rounded-xs border border-slate-200 bg-white shadow-sm">
       <div class="flex flex-col gap-4 border-b border-slate-200 p-5 lg:flex-row lg:items-end lg:justify-between">
         <div><h2 class="text-lg font-semibold">Scan results</h2><p class="mt-1 text-xs text-slate-500">{{ number.format(result.total) }} matching JPEGs · {{ number.format(selectedKeys.length) }} selected · eligibility excludes unknown metadata</p><p class="mt-1 text-xs text-slate-500">Selections persist across pages. Changing the bucket, scan, prefix, size, or status clears them. Maximum 5,000 selections.</p></div>
         <div class="flex flex-wrap gap-3">
           <button type="button" :disabled="!selectableOnPage.length || scanning || jobActive" class="self-end rounded border border-slate-300 px-3 py-2 text-xs disabled:opacity-50" @click="togglePageSelection">{{ allOnPageSelected ? 'Deselect this page' : 'Select eligible on this page' }}</button>
           <button type="button" :disabled="!selectedKeys.length" class="self-end rounded border border-slate-300 px-3 py-2 text-xs disabled:opacity-50" @click="selectedKeys = []">Clear selection</button>
-          <label class="text-xs font-medium text-slate-600">Status<select v-model="status" class="mt-1 block w-40 rounded-lg border border-slate-300 px-2.5 py-2 text-sm"><option value="all">All</option><option value="not_optimized">Not optimized</option><option value="optimized">Optimized</option><option value="unknown">Unknown</option></select></label>
+          <label class="text-xs font-medium text-slate-600">Status<select v-model="status" class="mt-1 block w-40 rounded-xs border border-slate-300 px-2.5 py-2 text-sm"><option value="all">All</option><option value="not_optimized">Not optimized</option><option value="optimized">Optimized</option><option value="unknown">Unknown</option></select></label>
         </div>
       </div>
       <div class="overflow-x-auto"><table class="w-full min-w-[840px] text-left text-sm"><thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th class="px-5 py-3">Select</th><th class="px-5 py-3">Object key</th><th class="px-5 py-3">Original size</th><th class="px-5 py-3">Last modified</th><th class="px-5 py-3">Status</th><th class="px-5 py-3">Saving</th><th class="px-5 py-3">Preview</th></tr></thead>

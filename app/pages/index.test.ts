@@ -94,6 +94,14 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   expect(wrapper.text()).not.toContain('Back up originals (required)')
   expect(wrapper.text()).toContain('Each original is backed up before replacement.')
   const jobSection = wrapper.findAll('section').find(section => section.find('h2').exists() && section.find('h2').text() === 'Optimize eligible JPEGs')
+  const scanCheckbox = wrapper.find('input[aria-label="Select photos/one.jpg"]')
+  for (const label of ['Preserve photo metadata', 'Delete the original backup', 'I understand']) {
+    const checkbox = inputFor(label)
+    for (const style of ['h-5', 'w-5', 'cursor-pointer', 'accent-orange-600']) {
+      expect(checkbox.classes()).toContain(style)
+      expect(scanCheckbox.classes()).toContain(style)
+    }
+  }
   expect(jobSection?.text()).toContain('Minimum original size (MiB)')
   expect((inputFor('Minimum original size').element as HTMLInputElement).value).toBe('1')
   expect(button('Start job').attributes('disabled')).toBeDefined()

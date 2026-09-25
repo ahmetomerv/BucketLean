@@ -26,7 +26,7 @@ function togglePreview() {
 
 <template>
   <div class="flex flex-col items-center gap-1.5">
-    <div class="flex h-[72px] w-[72px] items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-50 text-center text-[10px] text-slate-500" aria-live="polite">
+    <div class="flex h-[72px] w-[72px] items-center justify-center overflow-hidden rounded-xs border border-slate-200 bg-slate-50 text-center text-[10px] text-slate-500" aria-live="polite">
       <img v-if="requested && !failed" :src="previewUrl" :alt="`Preview of ${object.key}`" width="72" height="72" decoding="async" class="h-full w-full object-contain" :class="loaded ? '' : 'hidden'" @load="loaded = true" @error="failed = true">
       <span v-if="!requested">JPEG</span>
       <span v-else-if="failed">Unavailable</span>
