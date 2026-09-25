@@ -121,6 +121,8 @@ The old single-bucket database is incompatible. With the app stopped, remove `.d
 | `APP_PASSWORD` | Private app password, required for all app access |
 | `DATABASE_PATH` | SQLite file path; defaults to `.data/optimizer.sqlite` locally |
 
+SQLite databases and their `-wal`/`-shm` sidecars under `.data/` or `data/` are runtime state and are ignored by Git. Keep them on persistent local storage and use `npm run db:snapshot` for a consistent backup; do not commit live database files.
+
 Do not put credentials in `NUXT_PUBLIC_*` variables. Provide writable system temporary storage for at least one 128 MiB download plus the image validation files. The worker removes temporary downloads after success or handled failure. The job details endpoint, `/api/jobs/<id>`, includes each item's status, error, and backup key for recovery.
 
 ## Coolify deployment

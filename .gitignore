@@ -5,6 +5,9 @@ coverage
 docs/.vitepress/cache
 docs/.vitepress/dist
 .data
+/data/*.sqlite
+/data/*.sqlite-wal
+/data/*.sqlite-shm
 .env
 !.env.example
 *.log
