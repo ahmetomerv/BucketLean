@@ -107,7 +107,7 @@ test('job start requires acknowledgment and submits the selected settings', asyn
     }
   }
   expect(jobSection?.text()).toContain('Minimum original size (MiB)')
-  expect((inputFor('Minimum original size').element as HTMLInputElement).value).toBe('1')
+  expect((inputFor('Minimum original size').element as HTMLSelectElement).value).toBe('1')
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await inputFor('Key prefix').setValue('photos/')
   await inputFor('Minimum original size').setValue('2')
@@ -130,39 +130,24 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   wrapper.unmount()
 })
 
-test('minimum original size offers presets and accepts custom values from 1 to 50 MiB', async () => {
+test('minimum original size dropdown offers every MiB from 1 to 20 and sends the chosen size', async () => {
   setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1, metadataErrorCount: 0, startedAt: null }, eligible: 1 })
   const { wrapper, button, inputFor } = await renderPage()
-  const sizeInput = inputFor('Minimum original size')
+  const sizeSelect = inputFor('Minimum original size')
+  expect(sizeSelect.element.tagName).toBe('SELECT')
+  expect(sizeSelect.findAll('option').map(option => option.text())).toEqual(Array.from({ length: 20 }, (_, index) => `${index + 1} MiB`))
+  expect((sizeSelect.element as HTMLSelectElement).value).toBe('1')
   await inputFor('I understand').setValue(true)
   await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
-
-  for (const size of [3, 5, 8]) {
-    await button(`${size} MiB`).trigger('click')
-    await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
-    expect((sizeInput.element as HTMLInputElement).value).toBe(String(size))
-    expect(button(`${size} MiB`).attributes('aria-pressed')).toBe('true')
-  }
-
-  await sizeInput.setValue('0')
+  await sizeSelect.setValue('20')
+  expect((sizeSelect.element as HTMLSelectElement).value).toBe('20')
+  expect(wrapper.text()).toContain('0 selected for this job')
   expect(button('Start job').attributes('disabled')).toBeDefined()
-  await sizeInput.setValue('50.1')
-  expect(button('Start job').attributes('disabled')).toBeDefined()
-  await sizeInput.setValue('50')
   await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
   expect(button('Start job').attributes('disabled')).toBeUndefined()
-  await sizeInput.setValue('1')
-  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
-  expect(button('Start job').attributes('disabled')).toBeUndefined()
-  await sizeInput.setValue('')
-  expect(button('Start job').attributes('disabled')).toBeDefined()
-  await sizeInput.setValue('4.25')
-  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
-  expect(button('Start job').attributes('disabled')).toBeUndefined()
-  expect(button('3 MiB').attributes('aria-pressed')).toBe('false')
   await button('Start job').trigger('click')
   await flushPromises()
-  expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: expect.objectContaining({ minBytes: 4.25 * 1048576 }) })
+  expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: expect.objectContaining({ minBytes: 20 * 1048576 }) })
   wrapper.unmount()
 })
 

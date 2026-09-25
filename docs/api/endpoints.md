@@ -100,7 +100,7 @@ Create a job from the selected bucket's latest **completed** scan. This operatio
 | --- | --- | --- | --- |
 | `bucketId` | configured profile ID | sole profile, if only one | Select a bucket. |
 | `prefix` | string, at most 1,024 characters | `""` | Literal source-key prefix within the completed scan. |
-| `minBytes` | nonnegative safe integer | `1048576` | Minimum original size in bytes. The dashboard's **Minimum original size (MiB)** control accepts 1–50 MiB and sends this value in bytes; the API can also accept 0. |
+| `minBytes` | nonnegative safe integer | `1048576` | Minimum original size in bytes. The dashboard's **Minimum original size (MiB)** dropdown offers 1–20 MiB and sends this value in bytes; the API can also accept 0 or other sizes. |
 | `scanId` | positive integer | omitted | Required with `selectedKeys`; must identify the bucket's latest completed scan. |
 | `selectedKeys` | array of 1–5,000 unique object keys | omitted | When supplied, queue only these keys. Every key must still match the scan, prefix, size, JPEG, and optimization-state filters. The dashboard always supplies this field. When omitted, the API queues every eligible object matching the filters. |
 | `preset` | `archival`, `balanced`, or `aggressive` | `balanced` | JPEG qualities 90, 82, or 72. |

@@ -5,7 +5,7 @@ type BucketInfo = { id: string, endpoint: string, bucket: string }
 const { data: bucketResult } = await useFetch<{ buckets: BucketInfo[] }>('/api/buckets', { default: () => ({ buckets: [] }) })
 const bucketId = ref(bucketResult.value.buckets[0]?.id ?? '')
 const prefix = ref('')
-const minMiB = ref<number | string>(1)
+const minMiB = ref(1)
 const status = ref('all')
 const page = ref(1)
 const scanPrefix = ref('')
@@ -17,10 +17,9 @@ const preserveMetadata = ref(true)
 const deleteBackupAfterOptimization = ref(false)
 const acknowledged = ref(false)
 const selectedKeys = ref<string[]>([])
-const minimumSizeValid = computed(() => typeof minMiB.value === 'number' && Number.isFinite(minMiB.value) && minMiB.value >= 1 && minMiB.value <= 50)
-const previewMinMiB = computed(() => Math.min(50, Math.max(1, Number(minMiB.value) || 1)))
+const minimumSizeValid = computed(() => Number.isInteger(minMiB.value) && minMiB.value >= 1 && minMiB.value <= 20)
 
-const filters = computed(() => ({ bucketId: bucketId.value, prefix: prefix.value, minBytes: Math.floor(previewMinMiB.value * 1048576), status: status.value, page: page.value }))
+const filters = computed(() => ({ bucketId: bucketId.value, prefix: prefix.value, minBytes: minMiB.value * 1048576, status: status.value, page: page.value }))
 const { data: overview, refresh: refreshOverview } = await useFetch('/api/overview', { query: filters, default: () => ({ scan: null, totals: { objects: 0, jpegs: 0, jpegBytes: 0, optimized: 0, eligible: 0, metadataUnknown: 0 } }) })
 const { data: result, refresh: refreshObjects } = await useFetch('/api/objects', { query: filters, default: () => ({ items: [], total: 0, page: 1, pageSize: 100 }) })
 const { data: jobsResult, refresh: refreshJobs } = await useFetch('/api/jobs', { query: computed(() => ({ bucketId: bucketId.value })), default: () => ({ jobs: [] }) })
@@ -181,16 +180,11 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       <div class="mb-4"><h2 class="text-lg font-semibold">Optimize eligible JPEGs</h2><p class="mt-1 text-sm text-slate-600">Use the prefix and minimum size to find candidates, then select the JPEGs to optimize in Scan results. Already optimized and unknown objects cannot be selected. Each original is backed up before replacement.</p></div>
       <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <label class="text-xs font-medium text-slate-600">Key prefix<input v-model="prefix" type="text" placeholder="photos/" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"></label>
-        <div>
-          <label class="text-xs font-medium text-slate-600">Minimum original size (MiB)<input v-model.number="minMiB" type="number" min="1" max="50" step="any" :aria-invalid="!minimumSizeValid" aria-describedby="minimum-size-help" class="mt-1 block w-full rounded-xs border px-2.5 py-2 text-sm" :class="minimumSizeValid ? 'border-slate-300' : 'border-red-400'"></label>
-          <div class="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Minimum original size presets">
-            <button v-for="size in [3, 5, 8]" :key="size" type="button" :aria-pressed="minMiB === size" class="rounded-xs border px-2.5 py-1 text-xs font-medium" :class="minMiB === size ? 'border-orange-700 bg-orange-50 text-orange-800' : 'border-slate-300 text-slate-600 hover:border-orange-500'" @click="minMiB = size">{{ size }} MiB</button>
-          </div>
-        </div>
+        <label class="text-xs font-medium text-slate-600">Minimum original size (MiB)<select v-model.number="minMiB" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"><option v-for="size in 20" :key="size" :value="size">{{ size }} MiB</option></select></label>
         <label class="text-xs font-medium text-slate-600">JPEG preset<select v-model="preset" :disabled="jobActive" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"><option value="archival">Archival · quality 90</option><option value="balanced">Balanced · quality 82</option><option value="aggressive">Aggressive · quality 72</option></select></label>
         <label class="text-xs font-medium text-slate-600">Minimum saving (%)<input v-model.number="minimumSavingPercent" :disabled="jobActive" type="number" min="1" max="99" step="1" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"></label>
       </div>
-      <p id="minimum-size-help" class="mt-2 text-xs" :class="minimumSizeValid ? 'text-slate-500' : 'text-red-700'">{{ minimumSizeValid ? 'Default: 1 MiB. Choose 3, 5, or 8 MiB, or enter any value from 1 to 50 MiB. The eligible count and scan results below use this size.' : 'Enter a minimum original size from 1 to 50 MiB before starting a job.' }}</p>
+      <p class="mt-2 text-xs text-slate-500">Default: 1 MiB. Choose a minimum from 1 to 20 MiB. The eligible count and scan results below use this size.</p>
       <label class="mt-4 flex items-center gap-2 text-sm text-slate-700"><input v-model="preserveMetadata" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> Preserve photo metadata</label>
       <label class="mt-4 flex items-start gap-2 text-sm text-slate-700"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="mt-1 h-5 w-5 cursor-pointer accent-orange-600"> Delete the original backup after successful optimization. The optimized image stays at its original key; deleting the backup removes the restore copy.</label>
       <div class="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
