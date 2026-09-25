@@ -8,6 +8,7 @@ const refreshOverview = vi.fn(async () => {})
 const refreshObjects = vi.fn(async () => {})
 const refreshJobs = vi.fn(async () => {})
 const post = vi.fn(async () => ({}))
+const confirmJob = vi.fn(() => true)
 
 type DashboardData = {
   scan?: { id: number, bucketId: string, status: string, prefix: string, discoveredCount: number, metadataErrorCount: number, startedAt: string | null } | null
@@ -65,6 +66,7 @@ async function renderPage() {
 beforeEach(() => {
   for (const [name, value] of Object.entries({ ref, computed, watch, onMounted, onUnmounted })) vi.stubGlobal(name, value)
   vi.stubGlobal('$fetch', post)
+  vi.stubGlobal('confirm', confirmJob)
   vi.clearAllMocks()
 })
 afterEach(() => { vi.unstubAllGlobals() })
@@ -90,7 +92,26 @@ test('scan sends its prefix and refreshes the displayed results', async () => {
   wrapper.unmount()
 })
 
-test('job start requires acknowledgment and submits the selected settings', async () => {
+test('scan button shows a spinner only while the scan is queued or running', async () => {
+  const data = setupData({ scan: { id: 1, bucketId: 'default', status: 'queued', prefix: '', discoveredCount: 0,
+    metadataErrorCount: 0, startedAt: null } })
+  const { wrapper, button } = await renderPage()
+  for (const scanStatus of ['queued', 'running']) {
+    data.overview.value.scan!.status = scanStatus
+    await nextTick()
+    const scanButton = button('Scan in progress')
+    expect(scanButton.attributes('disabled')).toBeDefined()
+    expect(scanButton.attributes('aria-busy')).toBe('true')
+    expect(scanButton.find('span[aria-hidden="true"]').classes()).toContain('animate-spin')
+  }
+  data.overview.value.scan!.status = 'completed'
+  await nextTick()
+  expect(button('Start scan').attributes('aria-busy')).toBe('false')
+  expect(button('Start scan').find('span[aria-hidden="true"]').exists()).toBe(false)
+  wrapper.unmount()
+})
+
+test('job start uses confirmation and submits the selected settings', async () => {
   setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 2, metadataErrorCount: 0, startedAt: null }, eligible: 2 })
   const { wrapper, button, inputFor } = await renderPage()
   expect(wrapper.text()).not.toContain('Back up originals (required)')
@@ -99,7 +120,8 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   expect(jobSection?.element.lastElementChild?.classList.contains('justify-center')).toBe(true)
   expect(jobSection?.element.lastElementChild?.querySelector('button')?.textContent).toContain('Start job')
   const scanCheckbox = wrapper.find('input[aria-label="Select photos/one.jpg"]')
-  for (const label of ['Preserve photo metadata', 'Delete backup after successful optimization', 'I understand']) {
+  expect(wrapper.text()).not.toContain('I understand qualifying originals')
+  for (const label of ['Preserve photo metadata', 'Delete backup after successful optimization']) {
     const checkbox = inputFor(label)
     for (const style of ['h-5', 'w-5', 'cursor-pointer', 'accent-orange-600']) {
       expect(checkbox.classes()).toContain(style)
@@ -114,7 +136,6 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   await inputFor('JPEG preset').setValue('archival')
   await inputFor('Minimum saving').setValue('25')
   await inputFor('Preserve photo metadata').setValue(false)
-  await inputFor('I understand').setValue(true)
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
   expect(wrapper.text()).toContain('1 selected')
@@ -122,12 +143,12 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   expect(button('Start job').attributes('disabled')).toBeUndefined()
   await button('Start job').trigger('click')
   await flushPromises()
+  expect(confirmJob).toHaveBeenCalledWith(expect.stringContaining('1 selected JPEG in test'))
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: {
     bucketId: 'default', scanId: 1, selectedKeys: ['photos/one.jpg'], prefix: 'photos/', minBytes: 2 * 1048576, preset: 'archival', minimumSavingPercent: 25,
     preserveMetadata: false, deleteBackupAfterOptimization: false,
   } })
   expect(refreshJobs).toHaveBeenCalledOnce()
-  expect((inputFor('I understand').element as HTMLInputElement).checked).toBe(false)
   wrapper.unmount()
 })
 
@@ -138,7 +159,6 @@ test('minimum original size dropdown offers every MiB from 1 to 20 and sends the
   expect(sizeSelect.element.tagName).toBe('SELECT')
   expect(sizeSelect.findAll('option').map(option => option.text())).toEqual(Array.from({ length: 20 }, (_, index) => `${index + 1} MiB`))
   expect((sizeSelect.element as HTMLSelectElement).value).toBe('1')
-  await inputFor('I understand').setValue(true)
   await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
   await sizeSelect.setValue('20')
   expect((sizeSelect.element as HTMLSelectElement).value).toBe('20')
@@ -149,6 +169,19 @@ test('minimum original size dropdown offers every MiB from 1 to 20 and sends the
   await button('Start job').trigger('click')
   await flushPromises()
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: expect.objectContaining({ minBytes: 20 * 1048576 }) })
+  wrapper.unmount()
+})
+
+test('canceling the start-job confirmation leaves the selection and does not create a job', async () => {
+  setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1,
+    metadataErrorCount: 0, startedAt: null }, eligible: 1 })
+  confirmJob.mockReturnValueOnce(false)
+  const { wrapper, button, inputFor } = await renderPage()
+  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
+  await button('Start job').trigger('click')
+  expect(confirmJob).toHaveBeenCalledWith(expect.stringContaining('Are you sure'))
+  expect(post).not.toHaveBeenCalledWith('/api/jobs', expect.anything())
+  expect((wrapper.find('input[aria-label="Select photos/one.jpg"]').element as HTMLInputElement).checked).toBe(true)
   wrapper.unmount()
 })
 
@@ -222,10 +255,10 @@ test('backup cleanup is opt-in while required backup creation stays implicit', a
   expect(tooltip.classes()).toContain('group-focus-within:visible')
   expect((deletion.element as HTMLInputElement).checked).toBe(false)
   await deletion.setValue(true)
-  await inputFor('I understand').setValue(true)
   await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
   await button('Start job').trigger('click')
   await flushPromises()
+  expect(confirmJob).toHaveBeenCalledWith(expect.stringContaining('Original backups will be deleted after each optimized image is verified.'))
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: expect.objectContaining({
     deleteBackupAfterOptimization: true,
   }) })

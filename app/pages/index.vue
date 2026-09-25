@@ -15,7 +15,6 @@ const preset = ref<'archival' | 'balanced' | 'aggressive'>('balanced')
 const minimumSavingPercent = ref(15)
 const preserveMetadata = ref(true)
 const deleteBackupAfterOptimization = ref(false)
-const acknowledged = ref(false)
 const selectedKeys = ref<string[]>([])
 const minimumSizeValid = computed(() => Number.isInteger(minMiB.value) && minMiB.value >= 1 && minMiB.value <= 20)
 
@@ -25,7 +24,7 @@ const { data: result, refresh: refreshObjects } = await useFetch('/api/objects',
 const { data: jobsResult, refresh: refreshJobs } = await useFetch('/api/jobs', { query: computed(() => ({ bucketId: bucketId.value })), default: () => ({ jobs: [] }) })
 
 watch([prefix, minMiB, status], () => { page.value = 1; selectedKeys.value = [] })
-watch(bucketId, () => { prefix.value = ''; scanPrefix.value = ''; page.value = 1; selectedKeys.value = []; acknowledged.value = false; actionError.value = '' })
+watch(bucketId, () => { prefix.value = ''; scanPrefix.value = ''; page.value = 1; selectedKeys.value = []; actionError.value = '' })
 watch(() => overview.value.scan?.id, () => { selectedKeys.value = [] })
 const scanning = computed(() => overview.value.scan?.bucketId === bucketId.value && ['queued', 'running'].includes(overview.value.scan.status))
 const currentJob = computed(() => {
@@ -82,6 +81,12 @@ async function startScan() {
 }
 
 async function startJob() {
+  const bucketName = bucketResult.value.buckets.find(bucket => bucket.id === bucketId.value)?.bucket ?? bucketId.value
+  const backupPolicy = deleteBackupAfterOptimization.value
+    ? 'Original backups will be deleted after each optimized image is verified.'
+    : 'Original backups will be retained for restoration.'
+  const selectionLabel = `${number.format(selectedKeys.value.length)} selected JPEG${selectedKeys.value.length === 1 ? '' : 's'}`
+  if (!window.confirm(`Are you sure you want to start an optimization job for ${selectionLabel} in ${bucketName}?\n\nSelected originals may be replaced after verification. ${backupPolicy}`)) return
   busy.value = true
   actionError.value = ''
   try {
@@ -91,7 +96,6 @@ async function startJob() {
       minimumSavingPercent: minimumSavingPercent.value, preserveMetadata: preserveMetadata.value,
       deleteBackupAfterOptimization: deleteBackupAfterOptimization.value,
     } })
-    acknowledged.value = false
     selectedKeys.value = []
     await refreshJobs()
   } catch (error: unknown) {
@@ -172,7 +176,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       </div>
       <p v-if="overview.scan?.bucketId === bucketId && overview.scan.error" class="mt-3 text-sm text-red-700">{{ overview.scan.error }}</p>
       <div class="mt-5 flex justify-center border-t border-slate-100 pt-4">
-        <button :disabled="!bucketId || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan">{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
+        <button :disabled="!bucketId || scanning || jobActive || busy" :aria-busy="scanning" class="inline-flex items-center justify-center gap-2 rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan"><span v-if="scanning" aria-hidden="true" class="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white motion-reduce:animate-none"></span>{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
       </div>
     </section>
 
@@ -193,9 +197,6 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
           <span id="backup-deletion-help" role="tooltip" class="pointer-events-none invisible absolute bottom-full right-0 z-10 mb-2 w-72 max-w-[calc(100vw-3rem)] rounded-xs border border-slate-200 bg-white p-3 text-xs font-normal leading-relaxed text-slate-700 shadow-lg group-hover:visible group-focus-within:visible">The original is backed up before replacement. After the optimized image is verified at its original key, this option deletes that backup and its restore manifest. You will no longer have a restore copy.</span>
         </span>
       </div>
-      <div class="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
-        <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="acknowledged" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> I understand qualifying originals will be replaced after backup.</label>
-      </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
       <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">
         <h3 class="font-semibold">Job #{{ currentJob.job.id }} · <span class="capitalize">{{ currentJob.job.status.replaceAll('_', ' ') }}</span></h3>
@@ -215,7 +216,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         <p class="mt-1 text-xs text-slate-500">Backups: <code>__optimizer/originals/{{ currentJob.job.id }}/</code></p>
       </div>
       <div class="mt-5 flex justify-center border-t border-slate-100 pt-4">
-        <button :disabled="!bucketId || !acknowledged || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
+        <button :disabled="!bucketId || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
       </div>
     </section>
 
