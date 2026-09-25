@@ -186,10 +186,15 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       </div>
       <p class="mt-2 text-xs text-slate-500">Default: 1 MiB. Choose a minimum from 1 to 20 MiB. The eligible count and scan results below use this size.</p>
       <label class="mt-4 flex items-center gap-2 text-sm text-slate-700"><input v-model="preserveMetadata" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> Preserve photo metadata</label>
-      <label class="mt-4 flex items-start gap-2 text-sm text-slate-700"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="mt-1 h-5 w-5 cursor-pointer accent-orange-600"> Delete the original backup after successful optimization. The optimized image stays at its original key; deleting the backup removes the restore copy.</label>
+      <div class="mt-4 flex items-center gap-2 text-sm text-slate-700">
+        <label class="flex items-center gap-2"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> Delete backup after successful optimization</label>
+        <span class="group relative inline-flex">
+          <button type="button" aria-label="About backup deletion" aria-describedby="backup-deletion-help" class="flex h-5 w-5 items-center justify-center rounded-full border border-slate-400 text-xs font-semibold text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-600">i</button>
+          <span id="backup-deletion-help" role="tooltip" class="pointer-events-none invisible absolute bottom-full right-0 z-10 mb-2 w-72 max-w-[calc(100vw-3rem)] rounded-xs border border-slate-200 bg-white p-3 text-xs font-normal leading-relaxed text-slate-700 shadow-lg group-hover:visible group-focus-within:visible">The original is backed up before replacement. After the optimized image is verified at its original key, this option deletes that backup and its restore manifest. You will no longer have a restore copy.</span>
+        </span>
+      </div>
       <div class="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
         <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="acknowledged" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> I understand qualifying originals will be replaced after backup.</label>
-        <strong class="text-sm text-slate-900" role="status">{{ number.format(selectedKeys.length) }} selected for this job</strong>
       </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
       <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">
