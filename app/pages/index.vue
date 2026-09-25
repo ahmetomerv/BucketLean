@@ -16,6 +16,7 @@ const minimumSavingPercent = ref(15)
 const preserveMetadata = ref(true)
 const deleteBackupAfterOptimization = ref(false)
 const acknowledged = ref(false)
+const selectedKeys = ref<string[]>([])
 const minimumSizeValid = computed(() => typeof minMiB.value === 'number' && Number.isFinite(minMiB.value) && minMiB.value >= 1 && minMiB.value <= 50)
 const previewMinMiB = computed(() => Math.min(50, Math.max(1, Number(minMiB.value) || 1)))
 
@@ -24,8 +25,9 @@ const { data: overview, refresh: refreshOverview } = await useFetch('/api/overvi
 const { data: result, refresh: refreshObjects } = await useFetch('/api/objects', { query: filters, default: () => ({ items: [], total: 0, page: 1, pageSize: 100 }) })
 const { data: jobsResult, refresh: refreshJobs } = await useFetch('/api/jobs', { query: computed(() => ({ bucketId: bucketId.value })), default: () => ({ jobs: [] }) })
 
-watch([prefix, minMiB, status], () => { page.value = 1 })
-watch(bucketId, () => { prefix.value = ''; scanPrefix.value = ''; page.value = 1; acknowledged.value = false; actionError.value = '' })
+watch([prefix, minMiB, status], () => { page.value = 1; selectedKeys.value = [] })
+watch(bucketId, () => { prefix.value = ''; scanPrefix.value = ''; page.value = 1; selectedKeys.value = []; acknowledged.value = false; actionError.value = '' })
+watch(() => overview.value.scan?.id, () => { selectedKeys.value = [] })
 const scanning = computed(() => overview.value.scan?.bucketId === bucketId.value && ['queued', 'running'].includes(overview.value.scan.status))
 const currentJob = computed(() => {
   const jobs = jobsResult.value.jobs.filter(job => job && job.job.bucketId === bucketId.value)
@@ -33,6 +35,31 @@ const currentJob = computed(() => {
 })
 const jobActive = computed(() => ['queued', 'running', 'paused', 'needs_attention'].includes(currentJob.value?.job.status ?? ''))
 const maxPage = computed(() => Math.max(1, Math.ceil(result.value.total / result.value.pageSize)))
+const selectableOnPage = computed(() => overview.value.scan?.bucketId === bucketId.value && overview.value.scan.status === 'completed'
+  ? result.value.items.filter(item => item.isJpeg && !item.isOptimized && item.metadataStatus === 'known' && item.scanId === overview.value.scan?.id)
+  : [])
+const allOnPageSelected = computed(() => selectableOnPage.value.length > 0 && selectableOnPage.value.every(item => selectedKeys.value.includes(item.key)))
+function toggleSelected(key: string, checked: boolean) {
+  if (checked && !selectedKeys.value.includes(key) && selectedKeys.value.length < 5000) selectedKeys.value = [...selectedKeys.value, key]
+  if (!checked) selectedKeys.value = selectedKeys.value.filter(value => value !== key)
+}
+function toggleRowSelection(key: string) {
+  if (!selectableOnPage.value.some(item => item.key === key) || jobActive.value || scanning.value) return
+  toggleSelected(key, !selectedKeys.value.includes(key))
+}
+function togglePageSelection() {
+  if (allOnPageSelected.value) {
+    const keys = new Set(selectableOnPage.value.map(item => item.key))
+    selectedKeys.value = selectedKeys.value.filter(key => !keys.has(key))
+  } else {
+    const keys = new Set(selectedKeys.value)
+    for (const item of selectableOnPage.value) {
+      if (keys.size >= 5000) break
+      keys.add(item.key)
+    }
+    selectedKeys.value = [...keys]
+  }
+}
 const number = new Intl.NumberFormat()
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -46,6 +73,7 @@ async function startScan() {
   actionError.value = ''
   try {
     await $fetch('/api/scan', { method: 'POST', body: { bucketId: bucketId.value, prefix: scanPrefix.value } })
+    selectedKeys.value = []
     await Promise.all([refreshOverview(), refreshObjects()])
   } catch (error: unknown) {
     actionError.value = error && typeof error === 'object' && 'data' in error
@@ -59,11 +87,13 @@ async function startJob() {
   actionError.value = ''
   try {
     await $fetch('/api/jobs', { method: 'POST', body: {
-      bucketId: bucketId.value, prefix: prefix.value, minBytes: filters.value.minBytes, preset: preset.value,
+      bucketId: bucketId.value, scanId: overview.value.scan?.id, selectedKeys: selectedKeys.value,
+      prefix: prefix.value, minBytes: filters.value.minBytes, preset: preset.value,
       minimumSavingPercent: minimumSavingPercent.value, preserveMetadata: preserveMetadata.value,
       deleteBackupAfterOptimization: deleteBackupAfterOptimization.value,
     } })
     acknowledged.value = false
+    selectedKeys.value = []
     await refreshJobs()
   } catch (error: unknown) {
     actionError.value = error && typeof error === 'object' && 'data' in error
@@ -150,7 +180,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
     </section>
 
     <section class="mb-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="mb-4"><h2 class="text-lg font-semibold">Optimize eligible JPEGs</h2><p class="mt-1 text-sm text-slate-600">The key prefix and minimum original size below determine which scanned JPEGs enter this job. Already optimized and unknown objects are excluded. Each original is backed up before replacement.</p><p v-if="!prefix" class="mt-2 text-sm font-medium text-amber-700">No key prefix is set: this job will include all eligible JPEGs in the completed scan.</p></div>
+      <div class="mb-4"><h2 class="text-lg font-semibold">Optimize eligible JPEGs</h2><p class="mt-1 text-sm text-slate-600">Use the prefix and minimum size to find candidates, then select the JPEGs to optimize in Scan results. Already optimized and unknown objects cannot be selected. Each original is backed up before replacement.</p></div>
       <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <label class="text-xs font-medium text-slate-600">Key prefix<input v-model="prefix" type="text" placeholder="photos/" class="mt-1 block w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm"></label>
         <div>
@@ -167,7 +197,8 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       <label class="mt-4 flex items-start gap-2 text-sm text-slate-700"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="mt-1"> Delete the original backup after successful optimization. The optimized image stays at its original key; deleting the backup removes the restore copy.</label>
       <div class="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
         <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="acknowledged" :disabled="jobActive" type="checkbox"> I understand qualifying originals will be replaced after backup.</label>
-        <button :disabled="!bucketId || !acknowledged || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !overview.totals.eligible || scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(overview.totals.eligible)} JPEGs` }}</button>
+        <strong class="text-sm text-slate-900" role="status">{{ number.format(selectedKeys.length) }} selected for this job</strong>
+        <button :disabled="!bucketId || !acknowledged || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
       </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
       <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">
@@ -203,14 +234,16 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 
     <section class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
       <div class="flex flex-col gap-4 border-b border-slate-200 p-5 lg:flex-row lg:items-end lg:justify-between">
-        <div><h2 class="text-lg font-semibold">Scan results</h2><p class="mt-1 text-xs text-slate-500">{{ number.format(result.total) }} matching JPEGs · eligibility excludes unknown metadata · status filters this table only</p></div>
+        <div><h2 class="text-lg font-semibold">Scan results</h2><p class="mt-1 text-xs text-slate-500">{{ number.format(result.total) }} matching JPEGs · {{ number.format(selectedKeys.length) }} selected · eligibility excludes unknown metadata</p><p class="mt-1 text-xs text-slate-500">Selections persist across pages. Changing the bucket, scan, prefix, size, or status clears them. Maximum 5,000 selections.</p></div>
         <div class="flex flex-wrap gap-3">
+          <button type="button" :disabled="!selectableOnPage.length || scanning || jobActive" class="self-end rounded border border-slate-300 px-3 py-2 text-xs disabled:opacity-50" @click="togglePageSelection">{{ allOnPageSelected ? 'Deselect this page' : 'Select eligible on this page' }}</button>
+          <button type="button" :disabled="!selectedKeys.length" class="self-end rounded border border-slate-300 px-3 py-2 text-xs disabled:opacity-50" @click="selectedKeys = []">Clear selection</button>
           <label class="text-xs font-medium text-slate-600">Status<select v-model="status" class="mt-1 block w-40 rounded-lg border border-slate-300 px-2.5 py-2 text-sm"><option value="all">All</option><option value="not_optimized">Not optimized</option><option value="optimized">Optimized</option><option value="unknown">Unknown</option></select></label>
         </div>
       </div>
-      <div class="overflow-x-auto"><table class="w-full min-w-[840px] text-left text-sm"><thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th class="px-5 py-3">Preview</th><th class="px-5 py-3">Object key</th><th class="px-5 py-3">Original size</th><th class="px-5 py-3">Last modified</th><th class="px-5 py-3">Status</th><th class="px-5 py-3">Saving</th></tr></thead>
-        <tbody class="divide-y divide-slate-100"><tr v-for="item in result.items" :key="`${bucketId}:${item.scanId}:${item.key}:${item.etag}`"><td class="px-5 py-3"><ObjectPreview :bucket-id="bucketId" :object="item" /></td><td class="max-w-[440px] break-all px-5 py-3 font-mono text-xs text-slate-800">{{ item.key }}</td><td class="whitespace-nowrap px-5 py-3 tabular-nums">{{ formatBytes(item.size) }}</td><td class="whitespace-nowrap px-5 py-3 text-slate-600">{{ formatDate(item.lastModified) }}</td><td class="px-5 py-3"><span :class="item.metadataStatus === 'unknown' ? 'text-amber-700' : item.isOptimized ? 'text-emerald-700' : 'text-slate-600'">{{ item.metadataStatus === 'unknown' ? 'Unknown' : item.isOptimized ? 'Optimized' : 'Not optimized' }}</span></td><td class="px-5 py-3 text-slate-500">{{ item.savedPercent == null ? 'Not measured' : `${item.savedPercent}%` }}</td></tr>
-          <tr v-if="!result.items.length"><td colspan="6" class="px-5 py-10 text-center text-slate-500">{{ overview.scan ? 'No JPEGs match these filters.' : 'Start a scan to discover JPEGs.' }}</td></tr></tbody>
+      <div class="overflow-x-auto"><table class="w-full min-w-[840px] text-left text-sm"><thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th class="px-5 py-3">Select</th><th class="px-5 py-3">Object key</th><th class="px-5 py-3">Original size</th><th class="px-5 py-3">Last modified</th><th class="px-5 py-3">Status</th><th class="px-5 py-3">Saving</th><th class="px-5 py-3">Preview</th></tr></thead>
+        <tbody class="divide-y divide-slate-100"><tr v-for="item in result.items" :key="`${bucketId}:${item.scanId}:${item.key}:${item.etag}`" :tabindex="selectableOnPage.some(row => row.key === item.key) && !jobActive && !scanning ? 0 : -1" :aria-selected="selectedKeys.includes(item.key)" :class="selectableOnPage.some(row => row.key === item.key) && !jobActive && !scanning ? 'cursor-pointer hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-600' : ''" @click="toggleRowSelection(item.key)" @keydown.enter.prevent="toggleRowSelection(item.key)" @keydown.space.prevent="toggleRowSelection(item.key)"><td class="px-5 py-3"><input type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600" :aria-label="`Select ${item.key}`" :checked="selectedKeys.includes(item.key)" :disabled="!selectableOnPage.some(row => row.key === item.key) || jobActive || scanning || (selectedKeys.length >= 5000 && !selectedKeys.includes(item.key))" @click.stop @keydown.stop @change="toggleSelected(item.key, ($event.target as HTMLInputElement).checked)"></td><td class="max-w-[440px] break-all px-5 py-3 font-mono text-xs text-slate-800">{{ item.key }}</td><td class="whitespace-nowrap px-5 py-3 tabular-nums">{{ formatBytes(item.size) }}</td><td class="whitespace-nowrap px-5 py-3 text-slate-600">{{ formatDate(item.lastModified) }}</td><td class="px-5 py-3"><span :class="item.metadataStatus === 'unknown' ? 'text-amber-700' : item.isOptimized ? 'text-emerald-700' : 'text-slate-600'">{{ item.metadataStatus === 'unknown' ? 'Unknown' : item.isOptimized ? 'Optimized' : 'Not optimized' }}</span></td><td class="px-5 py-3 text-slate-500">{{ item.savedPercent == null ? 'Not measured' : `${item.savedPercent}%` }}</td><td class="px-5 py-3" @click.stop @keydown.stop><ObjectPreview :bucket-id="bucketId" :object="item" /></td></tr>
+          <tr v-if="!result.items.length"><td colspan="7" class="px-5 py-10 text-center text-slate-500">{{ overview.scan ? 'No JPEGs match these filters.' : 'Start a scan to discover JPEGs.' }}</td></tr></tbody>
       </table></div>
       <div class="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-sm"><span class="text-slate-500">Page {{ page }} of {{ maxPage }}</span><div class="flex gap-2"><button :disabled="page <= 1" class="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40" @click="page--">Previous</button><button :disabled="page >= maxPage" class="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40" @click="page++">Next</button></div></div>
     </section>

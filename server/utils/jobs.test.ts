@@ -444,6 +444,28 @@ test('creates more than two batches in key order', () => {
   } finally { lease.mockRestore() }
 })
 
+test('queues only selected keys across batches and rejects stale or ineligible selections atomically', () => {
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ bucketId: 'default', prefix: '', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  for (let index = 0; index < 105; index++) db.insert(objects).values({
+    bucketId: 'default', key: `selected/${String(index).padStart(3, '0')}.jpg`, scanId: scan.id, etag: '"old"', size: 200,
+    isJpeg: true, isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString(),
+  }).run()
+  const keys = Array.from({ length: 102 }, (_, index) => `selected/${String(index).padStart(3, '0')}.jpg`)
+  const settings = { prefix: 'selected/', minBytes: 100, preset: 'balanced' as const,
+    minimumSavingPercent: 15, preserveMetadata: true, backupOriginals: true, scanId: scan.id }
+  expect(() => enqueueJob({ ...settings, scanId: scan.id + 1, selectedKeys: keys })).toThrow('older scan')
+  expect(() => enqueueJob({ ...settings, selectedKeys: [...keys, 'selected/missing.jpg'] })).toThrow('no longer eligible')
+  expect(db.select().from(optimizationJobs).all()).toHaveLength(0)
+  const lease = vi.spyOn(workerLease, 'tryAcquire').mockReturnValue(false)
+  try {
+    const { job, count } = enqueueJob({ ...settings, selectedKeys: keys })
+    expect(count).toBe(102)
+    expect(db.select({ key: optimizationItems.key }).from(optimizationItems).where(eq(optimizationItems.jobId, job.id)).all().map(item => item.key)).toEqual(keys)
+    expect(send).not.toHaveBeenCalled()
+  } finally { lease.mockRestore() }
+})
+
 test.skipIf(!process.env.PERF_BENCH)('measures large job creation without R2 requests', () => {
   const db = getDatabase()
   const scan = db.insert(scans).values({ bucketId: 'default', prefix: 'bench/', status: 'completed', createdAt: new Date().toISOString() }).returning().get()

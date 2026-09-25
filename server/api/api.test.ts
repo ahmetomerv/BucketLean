@@ -127,6 +127,9 @@ test('rejects invalid filters, job settings, IDs and pages at the HTTP boundary'
   expect((await call('/api/jobs/123456')).status).toBe(404)
   expect((await call('/api/jobs', { method: 'POST', body: { minimumSavingPercent: 0 } })).status).toBe(400)
   expect((await call('/api/jobs', { method: 'POST', body: { deleteBackupAfterOptimization: 'yes' } })).status).toBe(400)
+  expect((await call('/api/jobs', { method: 'POST', body: { selectedKeys: ['x.jpg'] } })).status).toBe(400)
+  expect((await call('/api/jobs', { method: 'POST', body: { scanId: 1, selectedKeys: ['x.jpg', 'x.jpg'] } })).status).toBe(400)
+  expect((await call('/api/jobs', { method: 'POST', body: { scanId: 1, selectedKeys: [] } })).status).toBe(400)
   expect((await call('/api/scan', { method: 'POST', body: { prefix: 12 } })).status).toBe(400)
 })
 

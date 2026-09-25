@@ -19,7 +19,8 @@ type DashboardData = {
 
 function setupData({ scan = null, eligible = 0, activeJob = false, attentionJob = false, pausedJob = false }: DashboardData = {}) {
   const overview = ref({ scan, totals: { objects: 0, jpegs: eligible, jpegBytes: 0, optimized: 0, eligible, metadataUnknown: 0 } })
-  const objects = ref({ items: [], total: 0, page: 1, pageSize: 100 })
+  const objects = ref({ items: eligible ? [{ scanId: scan?.id ?? 1, key: 'photos/one.jpg', etag: '"old"', size: 10 * 1048576,
+    isJpeg: true, isOptimized: false, metadataStatus: 'known', lastModified: null, savedPercent: null }] : [], total: eligible ? 1 : 0, page: 1, pageSize: 100 })
   const attentionSummary = { job: { id: 1, bucketId: 'default', status: 'needs_attention' },
     total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 1,
     originalBytes: 100, finalBytes: null, savedBytes: null, savedPercent: null, current: null, nextRetryAt: null }
@@ -99,11 +100,14 @@ test('job start requires acknowledgment and submits the selected settings', asyn
   await inputFor('Minimum saving').setValue('25')
   await inputFor('Preserve photo metadata').setValue(false)
   await inputFor('I understand').setValue(true)
+  expect(button('Start job').attributes('disabled')).toBeDefined()
+  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
+  expect(wrapper.text()).toContain('1 selected for this job')
   expect(button('Start job').attributes('disabled')).toBeUndefined()
   await button('Start job').trigger('click')
   await flushPromises()
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: {
-    bucketId: 'default', prefix: 'photos/', minBytes: 2 * 1048576, preset: 'archival', minimumSavingPercent: 25,
+    bucketId: 'default', scanId: 1, selectedKeys: ['photos/one.jpg'], prefix: 'photos/', minBytes: 2 * 1048576, preset: 'archival', minimumSavingPercent: 25,
     preserveMetadata: false, deleteBackupAfterOptimization: false,
   } })
   expect(refreshJobs).toHaveBeenCalledOnce()
@@ -116,9 +120,11 @@ test('minimum original size offers presets and accepts custom values from 1 to 5
   const { wrapper, button, inputFor } = await renderPage()
   const sizeInput = inputFor('Minimum original size')
   await inputFor('I understand').setValue(true)
+  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
 
   for (const size of [3, 5, 8]) {
     await button(`${size} MiB`).trigger('click')
+    await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
     expect((sizeInput.element as HTMLInputElement).value).toBe(String(size))
     expect(button(`${size} MiB`).attributes('aria-pressed')).toBe('true')
   }
@@ -128,12 +134,15 @@ test('minimum original size offers presets and accepts custom values from 1 to 5
   await sizeInput.setValue('50.1')
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await sizeInput.setValue('50')
+  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
   expect(button('Start job').attributes('disabled')).toBeUndefined()
   await sizeInput.setValue('1')
+  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
   expect(button('Start job').attributes('disabled')).toBeUndefined()
   await sizeInput.setValue('')
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await sizeInput.setValue('4.25')
+  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
   expect(button('Start job').attributes('disabled')).toBeUndefined()
   expect(button('3 MiB').attributes('aria-pressed')).toBe('false')
   await button('Start job').trigger('click')
@@ -208,10 +217,75 @@ test('backup cleanup is opt-in while required backup creation stays implicit', a
   expect((deletion.element as HTMLInputElement).checked).toBe(false)
   await deletion.setValue(true)
   await inputFor('I understand').setValue(true)
+  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
   await button('Start job').trigger('click')
   await flushPromises()
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: expect.objectContaining({
     deleteBackupAfterOptimization: true,
   }) })
+  wrapper.unmount()
+})
+
+test('selection persists across pages and clears when filters change', async () => {
+  const data = setupData({ scan: { id: 4, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 2,
+    metadataErrorCount: 0, startedAt: null }, eligible: 2 })
+  data.objects.value.total = 200
+  const { wrapper, button, inputFor } = await renderPage()
+  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
+  expect(wrapper.text()).toContain('1 selected for this job')
+  await button('Next').trigger('click')
+  data.objects.value.items = [{ ...data.objects.value.items[0]!, key: 'photos/two.jpg' }]
+  await nextTick()
+  await wrapper.find('input[aria-label="Select photos/two.jpg"]').setValue(true)
+  expect(wrapper.text()).toContain('2 selected for this job')
+  await button('Previous').trigger('click')
+  data.objects.value.items = [{ ...data.objects.value.items[0]!, key: 'photos/one.jpg' }]
+  await nextTick()
+  expect((wrapper.find('input[aria-label="Select photos/one.jpg"]').element as HTMLInputElement).checked).toBe(true)
+  await inputFor('Key prefix').setValue('other/')
+  expect(wrapper.text()).toContain('0 selected for this job')
+  expect(button('Start job').attributes('disabled')).toBeDefined()
+  wrapper.unmount()
+})
+
+test('page selection excludes optimized and unknown objects', async () => {
+  const data = setupData({ scan: { id: 3, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 3,
+    metadataErrorCount: 0, startedAt: null }, eligible: 1 })
+  const eligible = data.objects.value.items[0]!
+  data.objects.value.items = [eligible, { ...eligible, key: 'photos/done.jpg', isOptimized: true },
+    { ...eligible, key: 'photos/unknown.jpg', metadataStatus: 'unknown' }]
+  const { wrapper, button } = await renderPage()
+  expect(wrapper.find('input[aria-label="Select photos/done.jpg"]').attributes('disabled')).toBeDefined()
+  expect(wrapper.find('input[aria-label="Select photos/unknown.jpg"]').attributes('disabled')).toBeDefined()
+  await button('Select eligible on this page').trigger('click')
+  expect(wrapper.text()).toContain('1 selected for this job')
+  await button('Deselect this page').trigger('click')
+  expect(wrapper.text()).toContain('0 selected for this job')
+  wrapper.unmount()
+})
+
+test('clicking an eligible row toggles selection without preview or checkbox double toggles', async () => {
+  const data = setupData({ scan: { id: 5, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 2,
+    metadataErrorCount: 0, startedAt: null }, eligible: 1 })
+  const eligible = data.objects.value.items[0]!
+  data.objects.value.items = [eligible, { ...eligible, key: 'photos/done.jpg', isOptimized: true }]
+  const { wrapper } = await renderPage()
+  expect(wrapper.findAll('thead th').map(cell => cell.text())).toEqual([
+    'Select', 'Object key', 'Original size', 'Last modified', 'Status', 'Saving', 'Preview',
+  ])
+  const rows = wrapper.findAll('tbody tr')
+  const checkbox = rows[0]!.find('input[type="checkbox"]')
+  expect(checkbox.classes()).toContain('h-5')
+  expect(checkbox.classes()).toContain('w-5')
+  await rows[0]!.findAll('td')[1]!.trigger('click')
+  expect((checkbox.element as HTMLInputElement).checked).toBe(true)
+  await rows[0]!.find('button[aria-label="Show preview of photos/one.jpg"]').trigger('click')
+  expect((checkbox.element as HTMLInputElement).checked).toBe(true)
+  await checkbox.setValue(false)
+  expect((checkbox.element as HTMLInputElement).checked).toBe(false)
+  await rows[0]!.trigger('keydown.space')
+  expect((checkbox.element as HTMLInputElement).checked).toBe(true)
+  await rows[1]!.trigger('click')
+  expect(wrapper.text()).toContain('1 selected for this job')
   wrapper.unmount()
 })

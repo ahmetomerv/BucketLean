@@ -38,7 +38,7 @@ function isMissingObject(error: unknown) {
     (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404
 }
 
-export function enqueueJob(input: { bucketId?: string, prefix: string, minBytes: number, preset: Preset, minimumSavingPercent: number, preserveMetadata: boolean, backupOriginals: boolean, deleteBackupAfterOptimization?: boolean }) {
+export function enqueueJob(input: { bucketId?: string, prefix: string, minBytes: number, preset: Preset, minimumSavingPercent: number, preserveMetadata: boolean, backupOriginals: boolean, deleteBackupAfterOptimization?: boolean, scanId?: number, selectedKeys?: string[] }) {
   const config = r2Config(input.bucketId)
   if (!input.backupOriginals) throw new Error('Original backups are required for this MVP')
   const db = getDatabase()
@@ -49,13 +49,21 @@ export function enqueueJob(input: { bucketId?: string, prefix: string, minBytes:
   if (activeJob) throw new Error('Resolve the existing optimization job before creating another')
   const scan = db.select().from(scans).where(and(eq(scans.bucketId, config.id), eq(scans.status, 'completed'))).orderBy(desc(scans.id)).get()
   if (!scan) throw new Error('Complete a scan before creating a job')
+  if (input.selectedKeys !== undefined && (input.scanId !== scan.id || !input.selectedKeys.length || input.selectedKeys.length > 5000 || new Set(input.selectedKeys).size !== input.selectedKeys.length)) {
+    throw new Error('Selection is invalid or belongs to an older scan; review the current results')
+  }
   const now = new Date().toISOString()
   const { job, count } = db.transaction((tx) => {
     const conditions = and(eq(objects.bucketId, config.id), eq(objects.scanId, scan.id), eq(objects.isJpeg, true), eq(objects.isOptimized, false),
       eq(objects.metadataStatus, 'known'), prefixCondition(input.prefix), sql`${objects.size} >= ${input.minBytes}`)
-    const firstBatch = tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
-      .where(conditions).orderBy(asc(objects.key)).limit(JOB_ITEM_BATCH_SIZE).all()
+    const selected = input.selectedKeys?.slice().sort()
+    const firstBatch = selected
+      ? tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
+          .where(and(conditions, inArray(objects.key, selected.slice(0, JOB_ITEM_BATCH_SIZE)))).orderBy(asc(objects.key)).all()
+      : tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
+          .where(conditions).orderBy(asc(objects.key)).limit(JOB_ITEM_BATCH_SIZE).all()
     if (!firstBatch.length) throw new Error('No eligible JPEGs match the filters')
+    if (selected && firstBatch.length !== Math.min(selected.length, JOB_ITEM_BATCH_SIZE)) throw new Error('Selected objects are no longer eligible; review the current results')
     const created = tx.insert(optimizationJobs).values({
       bucketId: config.id, scanId: scan.id, prefix: input.prefix, minBytes: input.minBytes,
       status: 'queued', preset: input.preset, minimumSavingPercent: input.minimumSavingPercent,
@@ -64,16 +72,26 @@ export function enqueueJob(input: { bucketId?: string, prefix: string, minBytes:
     }).returning().get()
     let batch = firstBatch
     let count = 0
+    let selectedOffset = 0
     while (batch.length) {
       tx.insert(optimizationItems).values(batch.map(candidate => ({
         jobId: created.id, key: candidate.key, etag: candidate.etag,
         originalSize: candidate.size, status: 'pending' as const, createdAt: now,
       }))).run()
       count += batch.length
-      if (batch.length < JOB_ITEM_BATCH_SIZE) break
-      const lastKey = batch[batch.length - 1]!.key
-      batch = tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
-        .where(and(conditions, gt(objects.key, lastKey))).orderBy(asc(objects.key)).limit(JOB_ITEM_BATCH_SIZE).all()
+      if (selected) {
+        selectedOffset += JOB_ITEM_BATCH_SIZE
+        if (selectedOffset >= selected.length) break
+        const keys = selected.slice(selectedOffset, selectedOffset + JOB_ITEM_BATCH_SIZE)
+        batch = tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
+          .where(and(conditions, inArray(objects.key, keys))).orderBy(asc(objects.key)).all()
+        if (batch.length !== keys.length) throw new Error('Selected objects are no longer eligible; review the current results')
+      } else {
+        if (batch.length < JOB_ITEM_BATCH_SIZE) break
+        const lastKey = batch[batch.length - 1]!.key
+        batch = tx.select({ key: objects.key, etag: objects.etag, size: objects.size }).from(objects)
+          .where(and(conditions, gt(objects.key, lastKey))).orderBy(asc(objects.key)).limit(JOB_ITEM_BATCH_SIZE).all()
+      }
     }
     return { job: created, count }
   })

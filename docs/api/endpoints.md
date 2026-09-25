@@ -101,6 +101,8 @@ Create a job from the selected bucket's latest **completed** scan. This operatio
 | `bucketId` | configured profile ID | sole profile, if only one | Select a bucket. |
 | `prefix` | string, at most 1,024 characters | `""` | Literal source-key prefix within the completed scan. |
 | `minBytes` | nonnegative safe integer | `1048576` | Minimum original size in bytes. The dashboard's **Minimum original size (MiB)** control accepts 1–50 MiB and sends this value in bytes; the API can also accept 0. |
+| `scanId` | positive integer | omitted | Required with `selectedKeys`; must identify the bucket's latest completed scan. |
+| `selectedKeys` | array of 1–5,000 unique object keys | omitted | When supplied, queue only these keys. Every key must still match the scan, prefix, size, JPEG, and optimization-state filters. The dashboard always supplies this field. When omitted, the API queues every eligible object matching the filters. |
 | `preset` | `archival`, `balanced`, or `aggressive` | `balanced` | JPEG qualities 90, 82, or 72. |
 | `minimumSavingPercent` | integer from 1 to 99 | `15` | Required saving before replacement. |
 | `preserveMetadata` | boolean | `true` | Require selected EXIF/ICC data to survive optimization. |
@@ -119,7 +121,7 @@ Create a job from the selected bucket's latest **completed** scan. This operatio
 }
 ```
 
-Returns `202` with a `job` object initially marked `queued` and a `count` of candidate items. A running scan or unresolved/active job in the selected bucket, no completed scan, no eligible items, or `backupOriginals: false` causes `409`. Candidate rows are persisted before the asynchronous worker starts.
+Returns `202` with a `job` object initially marked `queued` and a `count` of candidate items. A running scan or unresolved/active job in the selected bucket, no completed scan, no eligible items, stale or ineligible selected keys, or `backupOriginals: false` causes `409`. Invalid selection syntax causes `400`. All selected keys are verified and candidate rows persisted in one transaction before the asynchronous worker starts.
 
 ### `GET /api/jobs`
 

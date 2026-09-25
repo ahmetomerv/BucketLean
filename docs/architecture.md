@@ -111,7 +111,7 @@ For example, a scan of `photos/2026/` may find `photos/2026/IMG_0123.JPG` (eligi
 
 ### 2. Create a job from a completed scan
 
-The dashboard or `POST /api/jobs` filters known, unoptimized JPEGs by literal key prefix and minimum size. It stores one item per candidate. Defaults are Balanced quality **82**, minimum saving **15%**, metadata preservation on, mandatory verified original backup before replacement, and backup retention on. Archival and Aggressive use qualities 90 and 72.
+The dashboard filters known, unoptimized JPEGs by literal key prefix and minimum size, then sends the user's selected keys and scan ID to `POST /api/jobs`. The server verifies every selected key against the latest completed scan and filters in one SQLite transaction before inserting job items in batches. API callers may omit the selection to queue every eligible key. Defaults are Balanced quality **82**, minimum saving **15%**, metadata preservation on, mandatory verified original backup before replacement, and backup retention on. Archival and Aggressive use qualities 90 and 72.
 
 Example request (illustrative):
 
