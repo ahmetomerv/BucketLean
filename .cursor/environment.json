@@ -1,0 +1,11 @@
+{
+  "name": "BucketLean",
+  "install": "npm ci",
+  "terminals": [
+    {
+      "name": "dev-server",
+      "command": "NUXT_TELEMETRY_DISABLED=1 APP_PASSWORD=\"${APP_PASSWORD:-dev-password}\" npm run dev"
+    }
+  ],
+  "ports": [3000]
+}
