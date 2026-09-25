@@ -6,7 +6,6 @@ A private, self-hosted Nuxt application for finding and recompressing JPEGs in o
 
 For component and data-flow diagrams with examples, see the [architecture overview](docs/architecture.md).
 
-`public/bucketlean-logo.svg` is the official logo. The dashboard and documentation use it as their brand mark and SVG favicon. Run `npm run brand:icons` after changing it to regenerate the docs copy, the 32 px PNG favicon, and the 180 px Apple touch icon for both sites.
 
 ## Documentation site
 
