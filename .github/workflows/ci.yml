@@ -21,3 +21,29 @@ jobs:
         run: npm ci
       - name: Test, typecheck, and build app and docs
         run: npm run check
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t bucketlean:ci .
+      - name: Smoke /api/health
+        run: |
+          docker run -d --name bucketlean -p 3000:3000 \
+            -e APP_PASSWORD=ci-test-password \
+            -e R2_ENDPOINT=https://example.r2.cloudflarestorage.com \
+            -e R2_BUCKET=ci \
+            -e R2_ACCESS_KEY_ID=ci \
+            -e R2_SECRET_ACCESS_KEY=ci \
+            bucketlean:ci
+          cleanup() { docker logs bucketlean || true; docker rm -f bucketlean || true; }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/api/health | grep -q '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'Health check did not become ready in time'
+          exit 1

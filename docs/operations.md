@@ -10,6 +10,12 @@ Run this from the repository with the app's environment available. Choose a new 
 node --env-file=.env scripts/snapshot-db.mjs --output .data/snapshots/optimizer-YYYY-MM-DD.sqlite
 ```
 
+On a Docker or Coolify host, run the same script inside the app container so it uses the mounted `/app/data` database:
+
+```sh
+docker compose exec bucketlean node scripts/snapshot-db.mjs --output /app/data/snapshots/optimizer-YYYY-MM-DD.sqlite
+```
+
 The command uses SQLite's online backup API, refuses to overwrite an existing snapshot, verifies integrity, and prints all registered bucket profiles and job/item counts. Copy the snapshot outside the app host. Do not rely on copying only the live `.sqlite` file while WAL is active.
 
 ## Backfill manifests for older backups

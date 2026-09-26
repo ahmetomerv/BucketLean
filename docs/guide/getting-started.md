@@ -36,6 +36,28 @@ The same workflow is available through the [HTTP API](../api/index.md). Creating
 
 ## Deploy the application
 
-The included `Dockerfile` runs the server on port `3000` and stores SQLite at `/app/data/optimizer.sqlite`. Mount `/app/data` on a **local persistent volume**, run one app instance, and put HTTPS in front of it. SQLite WAL is not supported on a network filesystem. The `/api/health` endpoint checks SQLite and whether R2 settings are present; it does not contact R2.
+The included `Dockerfile` runs the server on port `3000` and stores SQLite at `/app/data/optimizer.sqlite`. Mount `/app/data` on a **local persistent volume**, run **one** app instance, and put HTTPS in front of it. SQLite WAL is not supported on a network filesystem. Do not scale to multiple replicas. The `/api/health` endpoint checks SQLite and whether R2 settings are present; it does not contact R2.
+
+### Docker Compose
+
+Copy `.env.example` to `.env`, set `APP_PASSWORD` and your R2 credentials, then:
+
+```sh
+docker compose up -d --build
+```
+
+Compose publishes port `3000`, mounts a named volume at `/app/data`, and uses the image health check against `/api/health`. Keep a single replica.
+
+### Coolify
+
+1. Create a new resource from this repository (Dockerfile or Docker Compose).
+2. Set the container/listen port to `3000`. Coolify’s HTTPS proxy should forward to that port.
+3. Attach **local** persistent storage mounted at `/app/data`. Do not use network/NFS storage for the database.
+4. Keep **replicas / instances at 1**. The in-process worker and SQLite WAL need a single writer.
+5. Add secrets from `.env.example`: `APP_PASSWORD` and either the four single-bucket `R2_*` values or `R2_BUCKETS_JSON`. Leave `DATABASE_PATH` unset unless you intentionally change it; the image default is `/app/data/optimizer.sqlite`.
+6. Set the health check path to `/api/health` (or rely on the Dockerfile `HEALTHCHECK`).
+7. Give the container enough memory for large JPEGs (about 1–2 GiB is a practical starting point; downloads are capped at 128 MiB).
+
+After deploy, open the public HTTPS URL and sign in with any username and `APP_PASSWORD`. Confirm `GET /api/health` returns `status: "ok"` before starting a scan.
 
 For snapshots, backup manifests, and restore drills, see [Operations and recovery](../operations.md). For the components and object flow, see [Architecture](../architecture.md).

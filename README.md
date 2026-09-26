@@ -27,7 +27,17 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000` and sign in with the configured password. Use a token with Object Read & Write access to optimize images; read-only access is enough to scan. See the [setup guide](docs/guide/getting-started.md) for single- and multi-bucket configuration and HTTPS deployment.
+Open `http://localhost:3000` and sign in with the configured password. Use a token with Object Read & Write access to optimize images; read-only access is enough to scan.
+
+To self-host with Docker (one instance, local volume on `/app/data`):
+
+```sh
+cp .env.example .env
+# Set APP_PASSWORD and your R2 credentials in .env.
+docker compose up -d --build
+```
+
+See the [setup guide](docs/guide/getting-started.md) for Coolify, Compose, single- and multi-bucket configuration, and HTTPS deployment.
 
 ## Usage
 
