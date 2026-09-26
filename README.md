@@ -16,6 +16,19 @@ BucketLean helps you find and shrink JPEGs across one or more R2 buckets. Scan f
 - **Recoverable jobs:** Progress is saved in SQLite, with options to resume paused jobs and recheck uncertain writes.
 - **Multiple buckets:** Configure and manage more than one R2 bucket from the same app.
 
+## Tech stack
+
+| Layer | Technologies |
+| --- | --- |
+| App | Nuxt 4, Vue 3, TypeScript, Tailwind CSS 4 |
+| Server | Nitro (`node-server`), Node.js 22+ |
+| Data | SQLite (`better-sqlite3`), Drizzle ORM |
+| Storage | Cloudflare R2 via AWS SDK for JavaScript (S3 API) |
+| Imaging | Sharp, ExifTool (`exiftool-vendored`) |
+| Docs | VitePress |
+| Deploy | Docker, Docker Compose (Coolify-friendly) |
+| Tests | Vitest |
+
 ## Quick start
 
 Requires Node.js 22 or newer, npm, and an R2 bucket.
