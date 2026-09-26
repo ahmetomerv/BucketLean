@@ -119,6 +119,20 @@ test('object filters and overview counts use the latest scan and a literal prefi
   expect(await eligible.json()).toMatchObject({ totals: { eligible: 1, metadataUnknown: 1 } })
 })
 
+test('scan results list 10 objects per page', async () => {
+  const db = getDatabase()
+  const scan = db.insert(scans).values({ bucketId: 'default', prefix: '', status: 'completed', createdAt: new Date().toISOString() }).returning().get()
+  for (let index = 1; index <= 11; index += 1) {
+    db.insert(objects).values({ bucketId: 'default', key: `paged/${String(index).padStart(2, '0')}.jpg`, scanId: scan.id,
+      size: 1000, isJpeg: true, isOptimized: false, metadataStatus: 'known', discoveredAt: new Date().toISOString() }).run()
+  }
+  const first = await (await call('/api/objects?prefix=paged/')).json()
+  expect(first).toMatchObject({ total: 11, page: 1, pageSize: 10 })
+  expect(first.items.map((item: { key: string }) => item.key)).toEqual(Array.from({ length: 10 }, (_, index) => `paged/${String(index + 1).padStart(2, '0')}.jpg`))
+  const second = await (await call('/api/objects?prefix=paged/&page=2')).json()
+  expect(second).toMatchObject({ total: 11, page: 2, pageSize: 10, items: [{ key: 'paged/11.jpg' }] })
+})
+
 test('rejects invalid filters, job settings, IDs and pages at the HTTP boundary', async () => {
   expect((await call('/api/objects?page=0')).status).toBe(400)
   expect((await call('/api/overview?minBytes=-1')).status).toBe(400)

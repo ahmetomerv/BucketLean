@@ -78,7 +78,7 @@ List JPEG discovery rows from the latest scan, sorted by key. Query parameters:
 | `status` | `all`, `optimized`, `not_optimized`, or `unknown` | `all` | Filter by optimizer/metadata state. |
 | `page` | positive safe integer | `1` | One-based page number. |
 
-Returns `200` with `{ "items": [...], "total": 25, "page": 1, "pageSize": 100 }`. Each item includes its `scanId`, `key`, `etag`, `size`, `isJpeg`, `isOptimized`, `metadataStatus`, and `metadataError`. `total` is the count **after** filters. The endpoint lists JPEGs only. `status=all` includes JPEGs with unknown metadata; `status=not_optimized` includes only confirmed unoptimized JPEGs. Use `status=unknown` to inspect metadata failures, which cannot enter a job.
+Returns `200` with `{ "items": [...], "total": 25, "page": 1, "pageSize": 10 }`. Each item includes its `scanId`, `key`, `etag`, `size`, `isJpeg`, `isOptimized`, `metadataStatus`, and `metadataError`. `total` is the count **after** filters. The endpoint lists JPEGs only. `status=all` includes JPEGs with unknown metadata; `status=not_optimized` includes only confirmed unoptimized JPEGs. Use `status=unknown` to inspect metadata failures, which cannot enter a job.
 
 ### `GET /api/objects/preview`
 

@@ -20,17 +20,15 @@ const minimumSizeValid = computed(() => Number.isInteger(minMiB.value) && minMiB
 
 const filters = computed(() => ({ bucketId: bucketId.value, prefix: prefix.value, minBytes: minMiB.value * 1048576, status: status.value, page: page.value }))
 const { data: overview, refresh: refreshOverview } = await useFetch('/api/overview', { query: filters, default: () => ({ scan: null, totals: { objects: 0, jpegs: 0, jpegBytes: 0, optimized: 0, eligible: 0, metadataUnknown: 0 } }) })
-const { data: result, refresh: refreshObjects } = await useFetch('/api/objects', { query: filters, default: () => ({ items: [], total: 0, page: 1, pageSize: 100 }) })
+const { data: result, refresh: refreshObjects } = await useFetch('/api/objects', { query: filters, default: () => ({ items: [], total: 0, page: 1, pageSize: 10 }) })
 const { data: jobsResult, refresh: refreshJobs } = await useFetch('/api/jobs', { query: computed(() => ({ bucketId: bucketId.value })), default: () => ({ jobs: [] }) })
 
 watch([prefix, minMiB, status], () => { page.value = 1; selectedKeys.value = [] })
 watch(bucketId, () => { prefix.value = ''; scanPrefix.value = ''; page.value = 1; selectedKeys.value = []; actionError.value = '' })
 watch(() => overview.value.scan?.id, () => { selectedKeys.value = [] })
 const scanning = computed(() => overview.value.scan?.bucketId === bucketId.value && ['queued', 'running'].includes(overview.value.scan.status))
-const currentJob = computed(() => {
-  const jobs = jobsResult.value.jobs.filter(job => job && job.job.bucketId === bucketId.value)
-  return jobs.find(job => job && ['needs_attention', 'paused'].includes(job.job.status)) ?? jobs[0] ?? null
-})
+const bucketJobs = computed(() => jobsResult.value.jobs.filter(job => job && job.job.bucketId === bucketId.value))
+const currentJob = computed(() => bucketJobs.value.find(job => job && ['needs_attention', 'paused'].includes(job.job.status)) ?? bucketJobs.value[0] ?? null)
 const jobActive = computed(() => ['queued', 'running', 'paused', 'needs_attention'].includes(currentJob.value?.job.status ?? ''))
 const maxPage = computed(() => Math.max(1, Math.ceil(result.value.total / result.value.pageSize)))
 const selectableOnPage = computed(() => overview.value.scan?.bucketId === bucketId.value && overview.value.scan.status === 'completed'
@@ -65,6 +63,26 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** unit).toFixed(1)} ${['B', 'KiB', 'MiB', 'GiB', 'TiB'][unit]}`
 }
 function formatDate(value: string | null) { return value ? new Date(value).toLocaleString() : '—' }
+function processedCount(summary: { completed: number, skipped: number, sourceChanged: number, invalidJpeg: number, failed: number, needsAttention: number }) {
+  return summary.completed + summary.skipped + summary.sourceChanged + summary.invalidJpeg + summary.failed + summary.needsAttention
+}
+function savedLabel(summary: { savedBytes: number | null, savedPercent: number | null, needsAttention: number }) {
+  if (summary.savedBytes == null) return summary.needsAttention ? 'Pending verification' : 'Unknown after source change'
+  return `${formatBytes(summary.savedBytes)} (${summary.savedPercent}%)`
+}
+function jobStatusClass(status: string) {
+  if (status === 'completed') return 'text-orange-700'
+  if (status === 'completed_with_errors' || status === 'needs_attention' || status === 'paused') return 'text-amber-700'
+  return 'text-slate-700'
+}
+function isLiveJob(status: string) {
+  return ['queued', 'running', 'paused', 'needs_attention'].includes(status)
+}
+function jobRowClass(status: string) {
+  if (status === 'paused' || status === 'needs_attention') return 'bg-amber-50/70'
+  if (status === 'queued' || status === 'running') return 'bg-orange-50/70'
+  return ''
+}
 
 async function startScan() {
   busy.value = true
@@ -105,12 +123,12 @@ async function startJob() {
   } finally { busy.value = false }
 }
 
-async function recheckJob() {
-  if (!currentJob.value) return
+async function recheckJob(jobId = currentJob.value?.job.id) {
+  if (!jobId) return
   busy.value = true
   actionError.value = ''
   try {
-    await $fetch(`/api/jobs/${currentJob.value.job.id}/reconcile`, { method: 'POST' })
+    await $fetch(`/api/jobs/${jobId}/reconcile`, { method: 'POST' })
     await refreshJobs()
   } catch (error: unknown) {
     actionError.value = error && typeof error === 'object' && 'data' in error
@@ -119,12 +137,12 @@ async function recheckJob() {
   } finally { busy.value = false }
 }
 
-async function resumeJob() {
-  if (!currentJob.value) return
+async function resumeJob(jobId = currentJob.value?.job.id) {
+  if (!jobId) return
   busy.value = true
   actionError.value = ''
   try {
-    await $fetch(`/api/jobs/${currentJob.value.job.id}/resume`, { method: 'POST' })
+    await $fetch(`/api/jobs/${jobId}/resume`, { method: 'POST' })
     await refreshJobs()
   } catch (error: unknown) {
     actionError.value = error && typeof error === 'object' && 'data' in error
@@ -198,25 +216,69 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         </span>
       </div>
       <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
-      <div v-if="currentJob" class="mt-5 border-t border-slate-100 pt-5">
-        <h3 class="font-semibold">Job #{{ currentJob.job.id }} · <span class="capitalize">{{ currentJob.job.status.replaceAll('_', ' ') }}</span></h3>
-        <p class="mt-1 text-sm text-slate-600">{{ number.format(currentJob.completed + currentJob.skipped + currentJob.sourceChanged + currentJob.invalidJpeg + currentJob.failed + currentJob.needsAttention) }} / {{ number.format(currentJob.total) }} processed · {{ number.format(currentJob.completed) }} optimized · {{ number.format(currentJob.skipped) }} skipped · {{ number.format(currentJob.sourceChanged) }} source changed · {{ number.format(currentJob.invalidJpeg) }} invalid JPEG · {{ number.format(currentJob.failed) }} failed · {{ number.format(currentJob.needsAttention) }} need attention</p>
-        <p v-if="currentJob.current" class="mt-1 break-all text-xs text-slate-600">Now {{ currentJob.current.status }}: <span class="font-mono">{{ currentJob.current.key }}</span></p>
-        <p v-if="currentJob.nextRetryAt" class="mt-1 text-xs text-slate-600">Next retry: {{ formatDate(new Date(currentJob.nextRetryAt).toISOString()) }}</p>
-        <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div class="h-full bg-orange-600" :style="{ width: `${currentJob.total ? 100 * (currentJob.completed + currentJob.skipped + currentJob.sourceChanged + currentJob.invalidJpeg + currentJob.failed + currentJob.needsAttention) / currentJob.total : 0}%` }"></div></div>
-        <p class="mt-3 text-sm text-slate-700">Original {{ formatBytes(currentJob.originalBytes) }} · Final {{ currentJob.finalBytes == null ? currentJob.needsAttention ? 'Pending verification' : 'Unknown after source change' : formatBytes(currentJob.finalBytes) }} · Saved {{ currentJob.savedBytes == null ? currentJob.needsAttention ? 'Pending verification' : 'Unknown after source change' : `${formatBytes(currentJob.savedBytes)} (${currentJob.savedPercent}%)` }}</p>
-        <div v-if="currentJob.job.status === 'needs_attention'" class="mt-3 rounded-xs border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-          <p>R2 did not confirm the source or backup state of {{ number.format(currentJob.needsAttention) }} item(s). Review the item errors in <code>/api/jobs/{{ currentJob.job.id }}</code>, then recheck the source and backup before retrying.</p>
-          <button :disabled="busy" class="mt-2 rounded bg-amber-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50" @click="recheckJob">{{ busy ? 'Rechecking…' : 'Recheck remote state' }}</button>
-        </div>
-        <div v-if="currentJob.job.status === 'paused'" class="mt-3 rounded-xs border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-          <p>Job paused after a bucket or credential error: {{ currentJob.job.pauseReason }}. Fix the R2 configuration or access, then resume.</p>
-          <button :disabled="busy" class="mt-2 rounded bg-amber-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50" @click="resumeJob">{{ busy ? 'Resuming…' : 'Resume job' }}</button>
-        </div>
-        <p class="mt-1 text-xs text-slate-500">Backups: <code>__optimizer/originals/{{ currentJob.job.id }}/</code></p>
-      </div>
       <div class="mt-5 flex justify-center border-t border-slate-100 pt-4">
         <button :disabled="!bucketId || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
+      </div>
+    </section>
+
+    <section v-if="bucketJobs.length" class="mb-8 overflow-hidden rounded-xs border border-slate-200 bg-white shadow-sm">
+      <div class="border-b border-slate-200 p-5">
+        <h2 class="text-lg font-semibold">Jobs</h2>
+        <p class="mt-1 text-xs text-slate-500">Recent jobs for this bucket.</p>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full min-w-[960px] text-left text-sm">
+          <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th class="px-5 py-3">Job</th>
+              <th class="px-5 py-3">Status</th>
+              <th class="px-5 py-3">Created</th>
+              <th class="px-5 py-3">Preset</th>
+              <th class="px-5 py-3">Processed</th>
+              <th class="px-5 py-3">Saved</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="summary in bucketJobs" :key="summary.job.id">
+              <tr :class="jobRowClass(summary.job.status)" class="border-t border-slate-100">
+                <td class="px-5 py-3">
+                  <p class="font-semibold">Job #{{ summary.job.id }}</p>
+                  <p class="mt-1 break-all font-mono text-xs text-slate-600">{{ summary.job.prefix || 'Entire bucket' }}</p>
+                  <p class="mt-1 text-xs text-slate-500"><code>/api/jobs/{{ summary.job.id }}</code></p>
+                </td>
+                <td class="px-5 py-3">
+                  <p :class="jobStatusClass(summary.job.status)" class="whitespace-nowrap capitalize">{{ summary.job.status.replaceAll('_', ' ') }}</p>
+                </td>
+                <td class="whitespace-nowrap px-5 py-3 text-slate-600">
+                  <p>{{ formatDate(summary.job.createdAt ?? null) }}</p>
+                  <p v-if="summary.job.finishedAt" class="mt-1 text-xs text-slate-500">Finished {{ formatDate(summary.job.finishedAt) }}</p>
+                </td>
+                <td class="whitespace-nowrap px-5 py-3 capitalize text-slate-700">{{ summary.job.preset ?? '—' }}<span v-if="summary.job.minimumSavingPercent != null" class="mt-1 block text-xs normal-case text-slate-500">{{ summary.job.minimumSavingPercent }}% minimum saving</span></td>
+                <td class="px-5 py-3 text-slate-600">{{ number.format(processedCount(summary)) }} / {{ number.format(summary.total) }} · {{ number.format(summary.completed) }} optimized · {{ number.format(summary.skipped) }} skipped · {{ number.format(summary.sourceChanged) }} source changed · {{ number.format(summary.invalidJpeg) }} invalid JPEG · {{ number.format(summary.failed) }} failed · {{ number.format(summary.needsAttention) }} need attention</td>
+                <td class="whitespace-nowrap px-5 py-3 tabular-nums">
+                  <p>{{ savedLabel(summary) }}</p>
+                  <p v-if="summary.finalBytes != null" class="mt-1 text-xs font-normal text-slate-500">Original {{ formatBytes(summary.originalBytes) }} · Final {{ formatBytes(summary.finalBytes) }}</p>
+                </td>
+              </tr>
+              <tr v-if="isLiveJob(summary.job.status)" :class="jobRowClass(summary.job.status)">
+                <td colspan="6" class="px-5 pb-4">
+                  <p v-if="summary.current" class="break-all text-xs text-slate-600">Now {{ summary.current.status }}: <span class="font-mono">{{ summary.current.key }}</span></p>
+                  <p v-if="summary.nextRetryAt" class="mt-1 text-xs text-slate-600">Next retry: {{ formatDate(new Date(summary.nextRetryAt).toISOString()) }}</p>
+                  <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div class="h-full bg-orange-600" :style="{ width: `${summary.total ? 100 * processedCount(summary) / summary.total : 0}%` }"></div></div>
+                  <div v-if="summary.job.status === 'needs_attention'" class="mt-3 rounded-xs border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    <p>R2 did not confirm the source or backup state of {{ number.format(summary.needsAttention) }} item(s). Review the item errors in <code>/api/jobs/{{ summary.job.id }}</code>, then recheck the source and backup before retrying.</p>
+                    <button :disabled="busy" class="mt-2 rounded bg-amber-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50" @click="recheckJob(summary.job.id)">{{ busy ? 'Rechecking…' : 'Recheck remote state' }}</button>
+                  </div>
+                  <div v-if="summary.job.status === 'paused'" class="mt-3 rounded-xs border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    <p>Job paused after a bucket or credential error: {{ summary.job.pauseReason }}. Fix the R2 configuration or access, then resume.</p>
+                    <button :disabled="busy" class="mt-2 rounded bg-amber-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50" @click="resumeJob(summary.job.id)">{{ busy ? 'Resuming…' : 'Resume job' }}</button>
+                  </div>
+                  <p class="mt-2 text-xs text-slate-500">Backups: <code>__optimizer/originals/{{ summary.job.id }}/</code></p>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -233,12 +295,21 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
     </section>
 
     <section class="overflow-hidden rounded-xs border border-slate-200 bg-white shadow-sm">
-      <div class="flex flex-col gap-4 border-b border-slate-200 p-5 lg:flex-row lg:items-end lg:justify-between">
-        <div><h2 class="text-lg font-semibold">Scan results</h2><p class="mt-1 text-xs text-slate-500">{{ number.format(result.total) }} matching JPEGs · {{ number.format(selectedKeys.length) }} selected · eligibility excludes unknown metadata</p><p class="mt-1 text-xs text-slate-500">Selections persist across pages. Changing the bucket, scan, prefix, size, or status clears them. Maximum 5,000 selections.</p></div>
-        <div class="flex flex-wrap gap-3">
-          <button type="button" :disabled="!selectableOnPage.length || scanning || jobActive" class="self-end rounded border border-slate-300 px-3 py-2 text-xs disabled:opacity-50" @click="togglePageSelection">{{ allOnPageSelected ? 'Deselect this page' : 'Select eligible on this page' }}</button>
-          <button type="button" :disabled="!selectedKeys.length" class="self-end rounded border border-slate-300 px-3 py-2 text-xs disabled:opacity-50" @click="selectedKeys = []">Clear selection</button>
-          <label class="text-xs font-medium text-slate-600">Status<select v-model="status" class="mt-1 block w-40 rounded-xs border border-slate-300 px-2.5 py-2 text-sm"><option value="all">All</option><option value="not_optimized">Not optimized</option><option value="optimized">Optimized</option><option value="unknown">Unknown</option></select></label>
+      <div class="border-b border-slate-200 p-5">
+        <h2 class="text-lg font-semibold">Scan results</h2>
+        <div class="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-600">
+          <span>Matching JPEGs: <strong class="tabular-nums text-slate-900">{{ number.format(result.total) }}</strong></span>
+          <span>Selected: <strong class="tabular-nums text-slate-900">{{ number.format(selectedKeys.length) }}</strong></span>
+        </div>
+        <p class="mt-2 max-w-3xl text-xs leading-relaxed text-slate-500">Selections persist across pages. Changing the bucket, scan, prefix, size, or status clears them. Maximum 5,000 selections. Unknown metadata is left out of eligibility.</p>
+        <div class="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-end sm:justify-between">
+          <label class="w-full text-xs font-medium text-slate-600 sm:w-48">Status
+            <select v-model="status" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"><option value="all">All</option><option value="not_optimized">Not optimized</option><option value="optimized">Optimized</option><option value="unknown">Unknown</option></select>
+          </label>
+          <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+            <button type="button" :disabled="!selectableOnPage.length || scanning || jobActive" class="w-full rounded border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto" @click="togglePageSelection">{{ allOnPageSelected ? 'Deselect this page' : 'Select eligible on this page' }}</button>
+            <button type="button" :disabled="!selectedKeys.length" class="w-full rounded border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto" @click="selectedKeys = []">Clear selection</button>
+          </div>
         </div>
       </div>
       <div class="overflow-x-auto"><table class="w-full min-w-[840px] text-left text-sm"><thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th class="px-5 py-3">Select</th><th class="px-5 py-3">Object key</th><th class="px-5 py-3">Original size</th><th class="px-5 py-3">Last modified</th><th class="px-5 py-3">Status</th><th class="px-5 py-3">Saving</th><th class="px-5 py-3">Preview</th></tr></thead>
