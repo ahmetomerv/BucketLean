@@ -4,15 +4,36 @@ BucketLean runs as a private Node server connected to one or more R2 buckets. It
 
 ## Run the application locally
 
-Requirements: Node.js 22 or newer, npm, and at least one R2 bucket. Use a token with Object Read & Write access to each bucket you intend to optimize; a read-only token is enough for scanning.
+Requirements: Node.js 22 or newer, npm, and at least one R2 bucket. Use Object Read & Write access for buckets you will optimize; read-only access is enough to scan.
 
-```sh
-cp .env.example .env
-npm ci
-npm run dev
-```
+1. Copy the example env file and edit `.env`:
 
-Set `APP_PASSWORD` and either the four single-bucket `R2_*` variables or `R2_BUCKETS_JSON` in `.env`. For JSON, provide one `id`, `endpoint`, `bucket`, `accessKeyId`, and `secretAccessKey` per bucket. Account-wide credentials can be repeated across entries; a bucket-scoped token can be used for its one entry. For example: `R2_BUCKETS_JSON='[{"id":"photos","endpoint":"https://ACCOUNT_ID.r2.cloudflarestorage.com","bucket":"photos","accessKeyId":"KEY","secretAccessKey":"SECRET"}]'`. The local database defaults to `.data/optimizer.sqlite`; set `DATABASE_PATH` to use another location. Open `http://localhost:3000` and sign in with any username and the configured app password. Keep the R2 credentials on the server and use HTTPS when deploying the app.
+   ```sh
+   cp .env.example .env
+   ```
+
+2. Set `APP_PASSWORD` to a long private password.
+
+3. Configure R2 credentials in one of these ways:
+   - **Single bucket:** fill in `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY`. The profile ID is `default`.
+   - **Multiple buckets:** leave those four empty and set `R2_BUCKETS_JSON` to a JSON array. Each entry needs `id`, `endpoint`, `bucket`, `accessKeyId`, and `secretAccessKey`. You can reuse account-wide credentials across entries, or use a bucket-scoped token for one entry.
+
+   ```sh
+   R2_BUCKETS_JSON='[{"id":"photos","endpoint":"https://ACCOUNT_ID.r2.cloudflarestorage.com","bucket":"photos","accessKeyId":"KEY","secretAccessKey":"SECRET"}]'
+   ```
+
+4. Optionally set `DATABASE_PATH`. The default is `.data/optimizer.sqlite`.
+
+5. Install dependencies and start the app:
+
+   ```sh
+   npm ci
+   npm run dev
+   ```
+
+6. Open `http://localhost:3000` and sign in with any username and your `APP_PASSWORD`.
+
+Keep R2 credentials on the server. Use HTTPS when you deploy.
 
 ## Ways to use the running app
 
