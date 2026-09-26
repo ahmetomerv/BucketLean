@@ -1,5 +1,8 @@
 # BucketLean
 
+[![CI](https://github.com/ahmetomerv/BucketLean/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmetomerv/BucketLean/actions/workflows/ci.yml)
+[![Deploy documentation](https://github.com/ahmetomerv/BucketLean/actions/workflows/pages.yml/badge.svg)](https://github.com/ahmetomerv/BucketLean/actions/workflows/pages.yml)
+
 ![BucketLean logo](public/bucketlean-logo.svg)
 
 **Self-hosted JPEG optimization for Cloudflare R2.**
@@ -75,3 +78,7 @@ To run the documentation site locally, use `npm run docs:dev`.
 npm test
 npm run check
 ```
+
+## License
+
+BucketLean is released under the [MIT License](LICENSE).
