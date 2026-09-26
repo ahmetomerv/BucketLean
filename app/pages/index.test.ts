@@ -21,7 +21,7 @@ type DashboardData = {
 function setupData({ scan = null, eligible = 0, activeJob = false, attentionJob = false, pausedJob = false }: DashboardData = {}) {
   const overview = ref({ scan, totals: { objects: 0, jpegs: eligible, jpegBytes: 0, optimized: 0, eligible, metadataUnknown: 0 } })
   const objects = ref({ items: eligible ? [{ scanId: scan?.id ?? 1, key: 'photos/one.jpg', etag: '"old"', size: 10 * 1048576,
-    isJpeg: true, isOptimized: false, metadataStatus: 'known', lastModified: null, savedPercent: null }] : [], total: eligible ? 1 : 0, page: 1, pageSize: 100 })
+    isJpeg: true, isOptimized: false, metadataStatus: 'known', lastModified: null, savedPercent: null }] : [], total: eligible ? 1 : 0, page: 1, pageSize: 10 })
   const attentionSummary = { job: { id: 1, bucketId: 'default', status: 'needs_attention' },
     total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 1,
     originalBytes: 100, finalBytes: null, savedBytes: null, savedPercent: null, current: null, nextRetryAt: null }
@@ -199,6 +199,49 @@ test('active work disables conflicting actions and API errors remain visible', a
   await flushPromises()
   expect(failed.wrapper.text()).toContain('R2 unavailable')
   failed.wrapper.unmount()
+})
+
+test('jobs panel lists the current job together with earlier runs', async () => {
+  const data = setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1,
+    metadataErrorCount: 0, startedAt: null }, eligible: 1, attentionJob: true })
+  data.jobs.value.jobs.push({
+    job: { id: 9, bucketId: 'default', status: 'completed_with_errors', preset: 'aggressive', prefix: 'archive/',
+      createdAt: '2026-08-01T00:00:00.000Z', finishedAt: '2026-08-01T01:00:00.000Z', minimumSavingPercent: 20, pauseReason: null },
+    total: 2, completed: 1, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 1, needsAttention: 0,
+    originalBytes: 200, finalBytes: 150, savedBytes: 50, savedPercent: 25, current: null, nextRetryAt: null,
+  }, {
+    job: { id: 8, bucketId: 'media', status: 'paused', preset: 'balanced', prefix: 'media/',
+      createdAt: '2026-07-01T00:00:00.000Z', finishedAt: null, minimumSavingPercent: 15, pauseReason: 'bucket: missing' },
+    total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 0,
+    originalBytes: 80, finalBytes: 80, savedBytes: 0, savedPercent: 0, current: null, nextRetryAt: null,
+  })
+  const { wrapper, button, inputFor } = await renderPage()
+  const jobs = wrapper.findAll('section').find(section => section.find('h2').exists() && section.find('h2').text() === 'Jobs')
+  const optimize = wrapper.findAll('section').find(section => section.find('h2').exists() && section.find('h2').text() === 'Optimize eligible JPEGs')
+  expect(optimize?.text()).not.toContain('Job #1')
+  expect(jobs?.text()).toContain('Job #1')
+  expect(jobs?.text()).toContain('Job #2')
+  expect(jobs?.text()).toContain('Job #9')
+  expect(jobs?.text()).toContain('needs attention')
+  expect(jobs?.text()).toContain('completed with errors')
+  expect(jobs?.text()).toContain('archive/')
+  expect(jobs?.text()).toContain('aggressive')
+  expect(jobs?.text()).toContain('20% minimum saving')
+  expect(jobs?.text()).toContain('2 / 2')
+  expect(jobs?.text()).toContain('1 failed')
+  expect(jobs?.text()).toContain('50 B (25%)')
+  expect(jobs?.text()).toContain('/api/jobs/9')
+  expect(jobs?.text()).not.toContain('Job #8')
+  await inputFor('R2 bucket').setValue('media')
+  await nextTick()
+  const mediaJobs = wrapper.findAll('section').find(section => section.find('h2').exists() && section.find('h2').text() === 'Jobs')
+  expect(mediaJobs?.text()).toContain('Job #8')
+  expect(mediaJobs?.text()).not.toContain('Job #1')
+  expect(wrapper.text()).toContain('bucket: missing')
+  await button('Resume job').trigger('click')
+  await flushPromises()
+  expect(post).toHaveBeenCalledWith('/api/jobs/8/resume', { method: 'POST' })
+  wrapper.unmount()
 })
 
 test('an uncertain job shows unknown totals and offers an explicit remote recheck', async () => {

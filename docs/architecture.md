@@ -122,7 +122,7 @@ Content-Type: application/json
 {"bucketId":"photos","prefix":"photos/2026/","minBytes":1048576,"preset":"balanced","minimumSavingPercent":15,"preserveMetadata":true,"deleteBackupAfterOptimization":false}
 ```
 
-The API returns a queued job and candidate count. The worker begins asynchronously; `GET /api/jobs` and `GET /api/jobs/<id>` show progress. Object and item lists are paginated in groups of 100.
+The API returns a queued job and candidate count. The worker begins asynchronously; `GET /api/jobs` and `GET /api/jobs/<id>` show progress. Scan results are paginated in groups of 10. Job item lists are paginated in groups of 100.
 
 ### 3. Process one JPEG safely
 
