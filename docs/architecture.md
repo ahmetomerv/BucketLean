@@ -12,7 +12,7 @@ flowchart LR
     Preview -->|check latest scan and ETag| DB
     Preview -->|conditional GetObject on demand| R2
     Preview -->|capped download| Temp[(System temporary files)]
-    Preview -->|72 px JPEG| Thumbnailer[Sharp thumbnail]
+    Preview -->|960 px JPEG| Thumbnailer[Sharp thumbnail]
     Plugin[Nitro worker plugin] -->|poll every 2 seconds| DB
     Plugin --> Scanner[Scan worker]
     Plugin --> Optimizer[Optimization worker]

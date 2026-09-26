@@ -82,13 +82,13 @@ Returns `200` with `{ "items": [...], "total": 25, "page": 1, "pageSize": 10 }`.
 
 ### `GET /api/objects/preview`
 
-Return a small JPEG thumbnail for one listed object. The dashboard requests it only when **Show preview** is pressed. Pass the `bucketId`, `key`, and `scanId` from the selected `GET /api/objects` item:
+Return a JPEG preview for one listed object. The dashboard requests it only when **Show preview** is pressed, then shows it in a modal. Pass the `bucketId`, `key`, and `scanId` from the selected `GET /api/objects` item:
 
 ```text
 GET /api/objects/preview?bucketId=photos&key=photos%2F2026%2Fportrait.jpg&scanId=7
 ```
 
-The route requires app authentication, confirms the JPEG belongs to the latest scan, and downloads it from R2 with the scanned ETag as a condition. It streams the original to a temporary file with a 128 MiB limit, creates a thumbnail no larger than 72 × 72 pixels, and deletes the temporary file. It never writes to R2 or returns the original image. A preview is a visual aid; the optimization job still checks the source again before replacement. Up to two previews run concurrently. A changed or stale scan returns `409`, a missing file returns `404`, an oversized file returns `413`, an invalid JPEG returns `422`, and a busy preview service returns `429`. Each requested preview costs one R2 object read.
+The route requires app authentication, confirms the JPEG belongs to the latest scan, and downloads it from R2 with the scanned ETag as a condition. It streams the original to a temporary file with a 128 MiB limit, creates a preview no larger than 960 × 960 pixels, and deletes the temporary file. It never writes to R2 or returns the original image. A preview is a visual aid; the optimization job still checks the source again before replacement. Up to two previews run concurrently. A changed or stale scan returns `409`, a missing file returns `404`, an oversized file returns `413`, an invalid JPEG returns `422`, and a busy preview service returns `429`. Each requested preview costs one R2 object read.
 
 ## Jobs
 

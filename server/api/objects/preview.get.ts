@@ -6,7 +6,7 @@ import { createR2Client, r2Config } from '../../utils/r2'
 import { selectBucketId } from '../../utils/buckets'
 import { downloadToTempFile, MAX_IMAGE_BYTES } from '../../utils/download'
 
-const PREVIEW_SIZE = 72
+const PREVIEW_SIZE = 960
 const MAX_CONCURRENT_PREVIEWS = 2
 let activePreviews = 0
 

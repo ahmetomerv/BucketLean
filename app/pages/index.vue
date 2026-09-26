@@ -97,9 +97,10 @@ function jobRowClass(status: string) {
   return ''
 }
 const liveJobs = computed(() => bucketJobs.value.filter(summary => isLiveJob(summary.job.status)))
-const jobsBadgeClass = computed(() => liveJobs.value.some(summary => summary.job.status === 'paused' || summary.job.status === 'needs_attention')
-  ? 'bg-amber-100 text-amber-800'
-  : 'bg-orange-100 text-orange-800')
+function tabBadgeClass(id: DashboardTab, selected: boolean) {
+  if (id === 'jobs' && liveJobs.value.some(summary => summary.job.status === 'paused' || summary.job.status === 'needs_attention')) return 'bg-amber-100 text-amber-900'
+  return selected ? 'bg-white text-orange-800' : 'bg-orange-100 text-orange-800'
+}
 const tabList = computed(() => [
   { id: 'optimize' as const, label: 'Optimize', badge: selectedKeys.value.length ? number.format(selectedKeys.value.length) : '' },
   { id: 'jobs' as const, label: 'Jobs', badge: liveJobs.value.length ? number.format(liveJobs.value.length) : '' },
@@ -238,10 +239,10 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
     </div>
 
     <div class="overflow-hidden rounded-xs border border-slate-200 bg-white shadow-sm">
-      <div role="tablist" aria-label="Dashboard" class="grid grid-cols-2 border-b border-slate-200">
-        <button v-for="item in tabList" :id="`tab-${item.id}`" :key="item.id" type="button" role="tab" :aria-selected="tab === item.id" :aria-controls="`panel-${item.id}`" :tabindex="tab === item.id ? 0 : -1" class="flex w-full flex-col items-center justify-center gap-0.5 border-b-2 px-2 py-2.5 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-orange-600 sm:flex-row sm:gap-2 sm:py-3" :class="tab === item.id ? 'border-orange-700 text-slate-900' : 'border-transparent text-slate-500 hover:text-slate-800'" @click="tab = item.id" @keydown="onTabKeydown">
+      <div role="tablist" aria-label="Dashboard" class="grid grid-cols-2 gap-2 border-b border-slate-200 bg-slate-100 p-2 sm:p-3">
+        <button v-for="item in tabList" :id="`tab-${item.id}`" :key="item.id" type="button" role="tab" :aria-selected="tab === item.id" :aria-controls="`panel-${item.id}`" :tabindex="tab === item.id ? 0 : -1" class="flex w-full cursor-pointer flex-col items-center justify-center gap-1 rounded-xs border px-3 py-2.5 text-sm font-semibold shadow-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-800 sm:flex-row sm:gap-2 sm:py-3" :class="tab === item.id ? 'border-orange-800 bg-orange-700 text-white' : 'border-slate-300 bg-white text-slate-700 hover:border-orange-300 hover:bg-orange-50 hover:text-slate-900'" @click="tab = item.id" @keydown="onTabKeydown">
           <span>{{ item.label }}</span>
-          <span v-if="item.badge" class="rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums" :class="item.id === 'jobs' ? jobsBadgeClass : 'bg-orange-100 text-orange-800'">{{ item.badge }}</span>
+          <span v-if="item.badge" class="rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums" :class="tabBadgeClass(item.id, tab === item.id)">{{ item.badge }}</span>
         </button>
       </div>
 

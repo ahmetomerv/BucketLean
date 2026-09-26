@@ -71,7 +71,7 @@ function call(key: string, scanId: number, authorized = true) {
 }
 
 test('returns a small rotated JPEG from the scanned source without writing to R2', async () => {
-  const original = await sharp({ create: { width: 240, height: 120, channels: 3, background: '#ee7800' } }).jpeg().toBuffer()
+  const original = await sharp({ create: { width: 1200, height: 600, channels: 3, background: '#ee7800' } }).jpeg().toBuffer()
   const { key, scanId } = scannedObject(original.length)
   send.mockImplementation(async (command: unknown) => {
     expect(command).toBeInstanceOf(GetObjectCommand)
@@ -85,7 +85,7 @@ test('returns a small rotated JPEG from the scanned source without writing to R2
   expect(response.headers.get('cache-control')).toBe('private, no-store')
   const thumbnail = Buffer.from(await response.arrayBuffer())
   expect(thumbnail.length).toBeLessThan(original.length)
-  expect(await sharp(thumbnail).metadata()).toMatchObject({ format: 'jpeg', width: 72, height: 36 })
+  expect(await sharp(thumbnail).metadata()).toMatchObject({ format: 'jpeg', width: 960, height: 480 })
   expect(send).toHaveBeenCalledOnce()
   expect(destroy).toHaveBeenCalledOnce()
 })
