@@ -10,6 +10,7 @@ const status = ref('all')
 const page = ref(1)
 const scanPrefix = ref('')
 const busy = ref(false)
+const pendingAction = ref<'' | 'scan'>('')
 const actionError = ref('')
 const preset = ref<'archival' | 'balanced' | 'aggressive'>('balanced')
 const minimumSavingPercent = ref(15)
@@ -26,13 +27,22 @@ const { data: jobsResult, refresh: refreshJobs } = await useFetch('/api/jobs', {
 watch([prefix, minMiB, status], () => { page.value = 1; selectedKeys.value = [] })
 watch(bucketId, () => { prefix.value = ''; scanPrefix.value = ''; page.value = 1; selectedKeys.value = []; actionError.value = '' })
 watch(() => overview.value.scan?.id, () => { selectedKeys.value = [] })
-const scanning = computed(() => overview.value.scan?.bucketId === bucketId.value && ['queued', 'running'].includes(overview.value.scan.status))
+const scanForBucket = computed(() => overview.value.scan?.bucketId === bucketId.value ? overview.value.scan : null)
+const scanning = computed(() => !!scanForBucket.value && ['queued', 'running'].includes(scanForBucket.value.status))
 const bucketJobs = computed(() => jobsResult.value.jobs.filter(job => job && job.job.bucketId === bucketId.value))
 const currentJob = computed(() => bucketJobs.value.find(job => job && ['needs_attention', 'paused'].includes(job.job.status)) ?? bucketJobs.value[0] ?? null)
 const jobActive = computed(() => ['queued', 'running', 'paused', 'needs_attention'].includes(currentJob.value?.job.status ?? ''))
+const canStartJob = computed(() => Boolean(bucketId.value && scanForBucket.value?.status === 'completed' && selectedKeys.value.length && minimumSizeValid.value) && !scanning.value && !jobActive.value && !busy.value)
+const optimizeHint = computed(() => {
+  if (currentJob.value?.job.status === 'paused') return 'This job is paused. Resume it from Jobs before starting another.'
+  if (jobActive.value) return 'A job is already running for this bucket.'
+  if (scanForBucket.value?.status !== 'completed') return 'Start a scan, then select JPEGs in the results below.'
+  if (!selectedKeys.value.length) return 'Select eligible JPEGs in the results below.'
+  return 'Object Read & Write access is required. The job starts only when you press the button.'
+})
 const maxPage = computed(() => Math.max(1, Math.ceil(result.value.total / result.value.pageSize)))
-const selectableOnPage = computed(() => overview.value.scan?.bucketId === bucketId.value && overview.value.scan.status === 'completed'
-  ? result.value.items.filter(item => item.isJpeg && !item.isOptimized && item.metadataStatus === 'known' && item.scanId === overview.value.scan?.id)
+const selectableOnPage = computed(() => scanForBucket.value?.status === 'completed'
+  ? result.value.items.filter(item => item.isJpeg && !item.isOptimized && item.metadataStatus === 'known' && item.scanId === scanForBucket.value?.id)
   : [])
 const allOnPageSelected = computed(() => selectableOnPage.value.length > 0 && selectableOnPage.value.every(item => selectedKeys.value.includes(item.key)))
 function toggleSelected(key: string, checked: boolean) {
@@ -86,6 +96,7 @@ function jobRowClass(status: string) {
 
 async function startScan() {
   busy.value = true
+  pendingAction.value = 'scan'
   actionError.value = ''
   try {
     await $fetch('/api/scan', { method: 'POST', body: { bucketId: bucketId.value, prefix: scanPrefix.value } })
@@ -95,7 +106,10 @@ async function startScan() {
     actionError.value = error && typeof error === 'object' && 'data' in error
       ? String((error as { data?: { statusMessage?: string } }).data?.statusMessage ?? 'Scan could not start')
       : 'Scan could not start'
-  } finally { busy.value = false }
+  } finally {
+    busy.value = false
+    pendingAction.value = ''
+  }
 }
 
 async function startJob() {
@@ -109,7 +123,7 @@ async function startJob() {
   actionError.value = ''
   try {
     await $fetch('/api/jobs', { method: 'POST', body: {
-      bucketId: bucketId.value, scanId: overview.value.scan?.id, selectedKeys: selectedKeys.value,
+      bucketId: bucketId.value, scanId: scanForBucket.value?.id, selectedKeys: selectedKeys.value,
       prefix: prefix.value, minBytes: filters.value.minBytes, preset: preset.value,
       minimumSavingPercent: minimumSavingPercent.value, preserveMetadata: preserveMetadata.value,
       deleteBackupAfterOptimization: deleteBackupAfterOptimization.value,
@@ -171,53 +185,84 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
       </div>
     </header>
 
-    <section class="mb-6 rounded-xs border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)] lg:items-end">
-        <label class="min-w-0 text-sm font-medium text-slate-700">R2 bucket
-          <select v-model="bucketId" :disabled="busy || !bucketResult.buckets.length" class="mt-2 block w-full rounded-xs border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-orange-600">
-            <option v-for="bucket in bucketResult.buckets" :key="bucket.id" :value="bucket.id">{{ bucket.bucket }} · {{ bucket.id }}</option>
-          </select>
-        </label>
-        <label class="min-w-0 text-sm font-medium text-slate-700">Scan prefix
-          <input v-model="scanPrefix" :disabled="!bucketId || scanning || jobActive" type="text" placeholder="Leave empty for entire bucket" class="mt-2 w-full rounded-xs border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-orange-600">
-        </label>
+    <section class="mb-8 rounded-xs border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+      <div>
+        <h2 class="text-lg font-semibold">Scan and optimize</h2>
+        <p class="mt-1 max-w-3xl text-sm text-slate-600">Scan a bucket, select JPEGs in the results below, then start a job. Scanning only reads R2. Each original is backed up before replacement.</p>
       </div>
+      <p v-if="actionError" class="mt-4 rounded-xs border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{{ actionError }}</p>
+      <label class="mt-5 block max-w-xl text-sm font-medium text-slate-700">R2 bucket
+        <select v-model="bucketId" :disabled="busy || !bucketResult.buckets.length" class="mt-2 block w-full rounded-xs border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-orange-600 disabled:cursor-not-allowed disabled:bg-slate-50">
+          <option v-for="bucket in bucketResult.buckets" :key="bucket.id" :value="bucket.id">{{ bucket.bucket }} · {{ bucket.id }}</option>
+        </select>
+      </label>
       <p v-if="!bucketResult.buckets.length" class="mt-2 text-sm text-amber-700">Configure an R2 bucket on the server before scanning.</p>
-      <p v-else class="mt-2 text-xs text-slate-500">Each bucket keeps separate scan results and jobs. The worker processes one operation at a time across the service.</p>
-      <p v-if="actionError" class="mt-3 text-sm text-red-700">{{ actionError }}</p>
-      <div v-if="overview.scan?.bucketId === bucketId" class="mt-4 flex flex-wrap gap-x-6 gap-y-1 border-t border-slate-100 pt-4 text-sm text-slate-600">
-        <span>Status: <strong class="capitalize text-slate-900">{{ overview.scan.status }}</strong></span>
-        <span>Scope: <strong class="text-slate-900">{{ overview.scan.prefix || 'Entire bucket' }}</strong></span>
-        <span>Started: {{ formatDate(overview.scan.startedAt) }}</span>
-        <span v-if="scanning">Discovered: {{ number.format(overview.scan.discoveredCount) }}</span>
-        <span v-if="overview.scan.metadataErrorCount" class="text-amber-700">{{ number.format(overview.scan.metadataErrorCount) }} metadata checks failed</span>
-      </div>
-      <p v-if="overview.scan?.bucketId === bucketId && overview.scan.error" class="mt-3 text-sm text-red-700">{{ overview.scan.error }}</p>
-      <div class="mt-5 flex justify-center border-t border-slate-100 pt-4">
-        <button :disabled="!bucketId || scanning || jobActive || busy" :aria-busy="scanning" class="inline-flex items-center justify-center gap-2 rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startScan"><span v-if="scanning" aria-hidden="true" class="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white motion-reduce:animate-none"></span>{{ scanning ? 'Scan in progress' : busy ? 'Starting…' : 'Start scan' }}</button>
-      </div>
-    </section>
+      <p v-else class="mt-2 text-xs text-slate-500">Each bucket keeps its own scan results and jobs. The worker runs one operation at a time.</p>
 
-    <section class="mb-8 rounded-xs border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="mb-4"><h2 class="text-lg font-semibold">Optimize eligible JPEGs</h2><p class="mt-1 text-sm text-slate-600">Use the prefix and minimum size to find candidates, then select the JPEGs to optimize in Scan results. Already optimized and unknown objects cannot be selected. Each original is backed up before replacement.</p></div>
-      <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <label class="text-xs font-medium text-slate-600">Key prefix<input v-model="prefix" type="text" placeholder="photos/" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"></label>
-        <label class="text-xs font-medium text-slate-600">Minimum original size (MiB)<select v-model.number="minMiB" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"><option v-for="size in 20" :key="size" :value="size">{{ size }} MiB</option></select></label>
-        <label class="text-xs font-medium text-slate-600">JPEG preset<select v-model="preset" :disabled="jobActive" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"><option value="archival">Archival · quality 90</option><option value="balanced">Balanced · quality 82</option><option value="aggressive">Aggressive · quality 72</option></select></label>
-        <label class="text-xs font-medium text-slate-600">Minimum saving (%)<input v-model.number="minimumSavingPercent" :disabled="jobActive" type="number" min="1" max="99" step="1" class="mt-1 block w-full rounded-xs border border-slate-300 px-2.5 py-2 text-sm"></label>
+      <div class="mt-6 border-t border-slate-200 pt-5">
+        <h3 class="flex items-center gap-2.5 text-base font-semibold text-slate-900">
+          <span aria-hidden="true" class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-100 text-xs font-semibold text-orange-800">1</span>
+          Scan
+        </h3>
+        <p class="mt-1 max-w-3xl text-sm text-slate-600">List JPEGs from this bucket. Leave the prefix empty to scan the whole bucket.</p>
+        <div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+          <label class="min-w-0 flex-1 text-sm font-medium text-slate-700">Scan prefix
+            <input v-model="scanPrefix" :disabled="!bucketId || scanning || jobActive" type="text" placeholder="Leave empty for entire bucket" class="mt-2 block w-full rounded-xs border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-orange-600 disabled:cursor-not-allowed disabled:bg-slate-50">
+          </label>
+          <button :disabled="!bucketId || scanning || jobActive || busy" :aria-busy="scanning || pendingAction === 'scan'" :class="scanForBucket?.status === 'completed' && !scanning && pendingAction !== 'scan' ? 'border border-slate-300 bg-white text-slate-800' : 'bg-orange-700 text-white'" class="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-xs px-5 py-2.5 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto" @click="startScan"><span v-if="scanning || pendingAction === 'scan'" aria-hidden="true" class="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white motion-reduce:animate-none"></span>{{ scanning ? 'Scan in progress' : pendingAction === 'scan' ? 'Starting…' : 'Start scan' }}</button>
+        </div>
+        <div v-if="scanForBucket" class="mt-4 flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-600">
+          <span>Status: <strong class="capitalize text-slate-900">{{ scanForBucket.status }}</strong></span>
+          <span>Scope: <strong class="text-slate-900">{{ scanForBucket.prefix || 'Entire bucket' }}</strong></span>
+          <span>Started: {{ formatDate(scanForBucket.startedAt) }}</span>
+          <span v-if="scanning">Discovered: {{ number.format(scanForBucket.discoveredCount) }}</span>
+          <span v-if="scanForBucket.metadataErrorCount" class="text-amber-700">{{ number.format(scanForBucket.metadataErrorCount) }} metadata checks failed</span>
+        </div>
+        <p v-else-if="bucketId" class="mt-4 text-sm text-slate-500">No scan yet for this bucket.</p>
+        <p v-if="scanForBucket?.error" class="mt-3 text-sm text-red-700">{{ scanForBucket.error }}</p>
       </div>
-      <p class="mt-2 text-xs text-slate-500">Default: 1 MiB. Choose a minimum from 1 to 20 MiB. The eligible count and scan results below use this size.</p>
-      <label class="mt-4 flex items-center gap-2 text-sm text-slate-700"><input v-model="preserveMetadata" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> Preserve photo metadata</label>
-      <div class="mt-4 flex items-center gap-2 text-sm text-slate-700">
-        <label class="flex items-center gap-2"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> Delete backup after successful optimization</label>
-        <span class="group relative inline-flex">
-          <button type="button" aria-label="About backup deletion" aria-describedby="backup-deletion-help" class="flex h-5 w-5 items-center justify-center rounded-full border border-slate-400 text-xs font-semibold text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-600">i</button>
-          <span id="backup-deletion-help" role="tooltip" class="pointer-events-none invisible absolute bottom-full right-0 z-10 mb-2 w-72 max-w-[calc(100vw-3rem)] rounded-xs border border-slate-200 bg-white p-3 text-xs font-normal leading-relaxed text-slate-700 shadow-lg group-hover:visible group-focus-within:visible">The original is backed up before replacement. After the optimized image is verified at its original key, this option deletes that backup and its restore manifest. You will no longer have a restore copy.</span>
-        </span>
-      </div>
-      <p class="mt-3 text-xs text-slate-500">The R2 credentials need Object Read &amp; Write access. Jobs only start when you press the button.</p>
-      <div class="mt-5 flex justify-center border-t border-slate-100 pt-4">
-        <button :disabled="!bucketId || !minimumSizeValid || !overview.scan || overview.scan.bucketId !== bucketId || overview.scan.status !== 'completed' || !selectedKeys.length || scanning || jobActive || busy" class="rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
+
+      <div class="mt-6 border-t border-slate-200 pt-5">
+        <h3 class="flex items-center gap-2.5 text-base font-semibold text-slate-900">
+          <span aria-hidden="true" class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-100 text-xs font-semibold text-orange-800">2</span>
+          Optimize
+        </h3>
+        <p class="mt-1 max-w-3xl text-sm text-slate-600">Key prefix and minimum size narrow the list below. Preset and saving apply to the job. Already optimized and unknown objects cannot be selected.</p>
+        <div class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <label class="text-sm font-medium text-slate-700">Key prefix
+            <input v-model="prefix" type="text" placeholder="Optional, within the scan" class="mt-2 block w-full rounded-xs border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-orange-600">
+          </label>
+          <label class="text-sm font-medium text-slate-700">Minimum original size (MiB)
+            <select v-model.number="minMiB" class="mt-2 block w-full rounded-xs border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-orange-600">
+              <option v-for="size in 20" :key="size" :value="size">{{ size }} MiB</option>
+            </select>
+          </label>
+          <label class="text-sm font-medium text-slate-700">JPEG preset
+            <select v-model="preset" :disabled="jobActive" class="mt-2 block w-full rounded-xs border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-orange-600 disabled:cursor-not-allowed disabled:bg-slate-50">
+              <option value="archival">Archival · quality 90</option>
+              <option value="balanced">Balanced · quality 82</option>
+              <option value="aggressive">Aggressive · quality 72</option>
+            </select>
+          </label>
+          <label class="text-sm font-medium text-slate-700">Minimum saving (%)
+            <input v-model.number="minimumSavingPercent" :disabled="jobActive" type="number" min="1" max="99" step="1" class="mt-2 block w-full rounded-xs border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-orange-600 disabled:cursor-not-allowed disabled:bg-slate-50">
+          </label>
+        </div>
+        <p class="mt-2 text-xs text-slate-500">Default is 1 MiB. Eligible count and scan results use this size, from 1 to 20 MiB.</p>
+        <div class="mt-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-8">
+          <label class="flex items-center gap-2 text-sm text-slate-700"><input v-model="preserveMetadata" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> Preserve photo metadata</label>
+          <div class="flex items-center gap-2 text-sm text-slate-700">
+            <label class="flex items-center gap-2"><input v-model="deleteBackupAfterOptimization" :disabled="jobActive" type="checkbox" class="h-5 w-5 cursor-pointer accent-orange-600"> Delete backup after successful optimization</label>
+            <span class="group relative inline-flex">
+              <button type="button" aria-label="About backup deletion" aria-describedby="backup-deletion-help" class="flex h-5 w-5 items-center justify-center rounded-full border border-slate-400 text-xs font-semibold text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-600">i</button>
+              <span id="backup-deletion-help" role="tooltip" class="pointer-events-none invisible absolute top-full right-0 z-10 mt-2 w-72 max-w-[calc(100vw-3rem)] rounded-xs border border-slate-200 bg-white p-3 text-xs font-normal leading-relaxed text-slate-700 shadow-lg group-hover:visible group-focus-within:visible">The original is backed up before replacement. After the optimized image is verified at its original key, this option deletes that backup and its restore manifest. You will no longer have a restore copy.</span>
+            </span>
+          </div>
+        </div>
+        <div class="mt-5 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <p class="text-sm text-slate-600">{{ optimizeHint }}</p>
+          <button :disabled="!canStartJob" class="inline-flex w-full shrink-0 items-center justify-center rounded-xs bg-orange-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto" @click="startJob">{{ currentJob?.job.status === 'paused' ? 'Job paused' : jobActive ? 'Job in progress' : `Start job for ${number.format(selectedKeys.length)} selected JPEGs` }}</button>
+        </div>
       </div>
     </section>
 
