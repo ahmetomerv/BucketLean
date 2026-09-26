@@ -26,7 +26,7 @@ BucketLean helps you find and shrink JPEGs across one or more R2 buckets. Scan f
 | App | Nuxt 4, Vue 3, TypeScript, Tailwind CSS 4 |
 | Server | Nitro (`node-server`), Node.js 22+ |
 | Data | SQLite (`better-sqlite3`), Drizzle ORM |
-| Storage | Cloudflare R2 via AWS SDK for JavaScript (S3 API) |
+| Storage | Cloudflare R2 (S3-compatible API, via `@aws-sdk/client-s3`) |
 | Imaging | Sharp, ExifTool (`exiftool-vendored`) |
 | Docs | VitePress |
 | Deploy | Docker, Docker Compose (Coolify-friendly) |
