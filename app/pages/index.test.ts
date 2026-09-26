@@ -22,16 +22,21 @@ function setupData({ scan = null, eligible = 0, activeJob = false, attentionJob 
   const overview = ref({ scan, totals: { objects: 0, jpegs: eligible, jpegBytes: 0, optimized: 0, eligible, metadataUnknown: 0 } })
   const objects = ref({ items: eligible ? [{ scanId: scan?.id ?? 1, key: 'photos/one.jpg', etag: '"old"', size: 10 * 1048576,
     isJpeg: true, isOptimized: false, metadataStatus: 'known', lastModified: null, savedPercent: null }] : [], total: eligible ? 1 : 0, page: 1, pageSize: 10 })
-  const attentionSummary = { job: { id: 1, bucketId: 'default', status: 'needs_attention' },
+  const attentionSummary = { job: { id: 1, bucketId: 'default', status: 'needs_attention' as string, preset: 'balanced' as string, prefix: '',
+    createdAt: '2026-09-01T00:00:00.000Z', finishedAt: null as string | null, minimumSavingPercent: 15, pauseReason: null as string | null },
     total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 1,
-    originalBytes: 100, finalBytes: null, savedBytes: null, savedPercent: null, current: null, nextRetryAt: null }
-  const jobs = ref({ jobs: attentionJob ? [
-    { ...attentionSummary, job: { id: 2, bucketId: 'default', status: 'completed' }, needsAttention: 0,
+    originalBytes: 100, finalBytes: null as number | null, savedBytes: null as number | null, savedPercent: null as number | null, current: null as { key: string, status: string } | null, nextRetryAt: null as number | null }
+  type MockJobSummary = typeof attentionSummary
+  const jobsList: MockJobSummary[] = attentionJob ? [
+    { ...attentionSummary, job: { id: 2, bucketId: 'default', status: 'completed', preset: 'balanced', prefix: '',
+      createdAt: '2026-09-01T00:00:00.000Z', finishedAt: '2026-09-01T01:00:00.000Z', minimumSavingPercent: 15, pauseReason: null }, needsAttention: 0,
       finalBytes: 70, savedBytes: 30, savedPercent: 30 }, attentionSummary,
-  ] : activeJob || pausedJob ? [{ job: { id: 1, bucketId: 'default', status: pausedJob ? 'paused' : 'running', pauseReason: pausedJob ? 'credentials: Access denied' : null },
+  ] : activeJob || pausedJob ? [{ job: { id: 1, bucketId: 'default', status: pausedJob ? 'paused' : 'running', preset: 'balanced', prefix: '',
+    createdAt: '2026-09-01T00:00:00.000Z', finishedAt: null, minimumSavingPercent: 15, pauseReason: pausedJob ? 'credentials: Access denied' : null },
     total: 1, completed: 0, skipped: 0, sourceChanged: 0, invalidJpeg: 0, failed: 0, needsAttention: 0,
     originalBytes: 100, finalBytes: 100, savedBytes: 0,
-    savedPercent: 0, current: null, nextRetryAt: null }] : [] })
+    savedPercent: 0, current: null, nextRetryAt: null }] : []
+  const jobs = ref({ jobs: jobsList })
   vi.stubGlobal('useFetch', (url: string) => {
     if (url === '/api/buckets') return { data: ref({ buckets: [
       { id: 'default', endpoint: 'https://example.r2.cloudflarestorage.com/', bucket: 'test' },

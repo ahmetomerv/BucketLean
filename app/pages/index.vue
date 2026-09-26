@@ -32,8 +32,8 @@ watch(bucketId, () => { prefix.value = ''; scanPrefix.value = ''; page.value = 1
 watch(() => overview.value.scan?.id, () => { selectedKeys.value = [] })
 const scanForBucket = computed(() => overview.value.scan?.bucketId === bucketId.value ? overview.value.scan : null)
 const scanning = computed(() => !!scanForBucket.value && ['queued', 'running'].includes(scanForBucket.value.status))
-const bucketJobs = computed(() => jobsResult.value.jobs.filter(job => job && job.job.bucketId === bucketId.value))
-const currentJob = computed(() => bucketJobs.value.find(job => job && ['needs_attention', 'paused'].includes(job.job.status)) ?? bucketJobs.value[0] ?? null)
+const bucketJobs = computed(() => jobsResult.value.jobs.filter(job => job.job.bucketId === bucketId.value))
+const currentJob = computed(() => bucketJobs.value.find(job => ['needs_attention', 'paused'].includes(job.job.status)) ?? bucketJobs.value[0] ?? null)
 const jobActive = computed(() => ['queued', 'running', 'paused', 'needs_attention'].includes(currentJob.value?.job.status ?? ''))
 const canStartJob = computed(() => Boolean(bucketId.value && scanForBucket.value?.status === 'completed' && selectedKeys.value.length && minimumSizeValid.value) && !scanning.value && !jobActive.value && !busy.value)
 const optimizeHint = computed(() => {

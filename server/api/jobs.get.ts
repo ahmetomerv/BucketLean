@@ -12,5 +12,5 @@ export default defineEventHandler((event) => {
   const blocked = db.select({ id: optimizationJobs.id }).from(optimizationJobs)
     .where(and(eq(optimizationJobs.bucketId, bucketId), inArray(optimizationJobs.status, ['needs_attention', 'paused']))).orderBy(desc(optimizationJobs.id)).all()
   const ids = [...blocked.map(job => job.id), ...jobs.filter(job => !blocked.some(blockedJob => blockedJob.id === job.id)).map(job => job.id)]
-  return { jobs: ids.map(id => getJobSummary(id)) }
+  return { jobs: ids.map(id => getJobSummary(id)).filter((summary): summary is NonNullable<typeof summary> => summary != null) }
 })
