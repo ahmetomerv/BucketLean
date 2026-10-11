@@ -23,7 +23,7 @@ BucketLean helps you find and shrink JPEGs across one or more R2 buckets. Scan f
 
 | Layer | Technologies |
 | --- | --- |
-| App | Nuxt 4, Vue 3, TypeScript, Tailwind CSS 4 |
+| App | Nuxt 4, Vue 3, TypeScript, Element Plus |
 | Server | Nitro (`node-server`), Node.js 22+ |
 | Data | SQLite (`better-sqlite3`), Drizzle ORM |
 | Storage | Cloudflare R2 (S3-compatible API, via `@aws-sdk/client-s3`) |

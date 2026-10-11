@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { computed, nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
+import ElementPlus from 'element-plus'
 import ObjectPreview from './ObjectPreview.vue'
 
 beforeEach(() => {
@@ -13,7 +14,7 @@ afterEach(() => { vi.unstubAllGlobals() })
 function mountPreview(object: { key: string, scanId: number }) {
   return mount(ObjectPreview, {
     props: { bucketId: 'photos', object },
-    global: { stubs: { Teleport: true } },
+    global: { plugins: [ElementPlus], stubs: { Teleport: true } },
   })
 }
 

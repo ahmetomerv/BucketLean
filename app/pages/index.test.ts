@@ -2,13 +2,20 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, Suspense, watch } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
+import ElementPlus from 'element-plus'
 import Page from './index.vue'
+
+const confirmJob = vi.hoisted(() => vi.fn((_message: string, _title?: string, _options?: object) => Promise.resolve()))
+
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return { ...actual, ElMessageBox: { ...actual.ElMessageBox, confirm: confirmJob } }
+})
 
 const refreshOverview = vi.fn(async () => {})
 const refreshObjects = vi.fn(async () => {})
 const refreshJobs = vi.fn(async () => {})
 const post = vi.fn(async () => ({}))
-const confirmJob = vi.fn(() => true)
 
 type DashboardData = {
   scan?: { id: number, bucketId: string, status: string, prefix: string, discoveredCount: number, metadataErrorCount: number, startedAt: string | null } | null
@@ -52,7 +59,7 @@ function setupData({ scan = null, eligible = 0, activeJob = false, attentionJob 
 
 async function renderPage() {
   const Host = defineComponent({ render: () => h(Suspense, null, { default: () => h(Page) }) })
-  const wrapper = mount(Host)
+  const wrapper = mount(Host, { global: { plugins: [ElementPlus] } })
   await flushPromises()
   await nextTick()
   const button = (label: string) => {
@@ -60,18 +67,48 @@ async function renderPage() {
     if (!found) throw new Error(`Button not found: ${label}`)
     return found
   }
-  const inputFor = (label: string) => {
-    const found = wrapper.findAll('label').find(item => item.text().includes(label))
-    if (!found) throw new Error(`Label not found: ${label}`)
-    return found.find('input, select')
+  const fieldFor = (label: string) => {
+    const checkbox = wrapper.findAll('label.el-checkbox').find(item => item.text().includes(label))
+    if (checkbox) return checkbox
+    const field = wrapper.findAll('.el-form-item').find(item => item.find('.el-form-item__label').text().includes(label))
+    if (!field) throw new Error(`Label not found: ${label}`)
+    return field
   }
-  return { wrapper, button, inputFor }
+  const inputFor = (label: string) => {
+    const field = fieldFor(label)
+    const select = field.findComponent({ name: 'ElSelect' })
+    if (select.exists()) {
+      return {
+        element: select.element,
+        attributes: () => ({}),
+        async setValue(value: string | number | boolean) {
+          const current = select.props('modelValue')
+          const next = typeof current === 'number' ? Number(value) : value
+          select.vm.$emit('update:modelValue', next)
+          await nextTick()
+        },
+      }
+    }
+    return field.find('input, textarea')
+  }
+  const checkboxFor = (label: string) => {
+    const checkbox = wrapper.findAll('label.el-checkbox').find(item => item.text().includes(label))
+    if (!checkbox) throw new Error(`Label not found: ${label}`)
+    return checkbox.get('input[type="checkbox"]')
+  }
+  const selectFor = (label: string) => fieldFor(label).getComponent({ name: 'ElSelect' })
+  const rowCheckbox = (key: string) => {
+    const labeled = wrapper.get(`[aria-label="Select ${key}"]`)
+    return labeled.element.tagName === 'INPUT' ? labeled : labeled.get('input[type="checkbox"]')
+  }
+  return { wrapper, button, inputFor, checkboxFor, selectFor, rowCheckbox }
 }
 
 beforeEach(() => {
   for (const [name, value] of Object.entries({ ref, computed, watch, onMounted, onUnmounted })) vi.stubGlobal(name, value)
   vi.stubGlobal('$fetch', post)
-  vi.stubGlobal('confirm', confirmJob)
+  confirmJob.mockReset()
+  confirmJob.mockImplementation(() => Promise.resolve())
   vi.clearAllMocks()
 })
 afterEach(() => { vi.unstubAllGlobals() })
@@ -85,9 +122,9 @@ test('scan sends its prefix and refreshes the displayed results', async () => {
   expect(wrapper.text()).toContain('R2 bucket')
   expect(wrapper.get('[role="tablist"]').attributes('aria-label')).toBe('Dashboard')
   expect(wrapper.get('#tab-optimize').attributes('aria-selected')).toBe('true')
-  expect(wrapper.get('#panel-jobs').attributes('hidden')).toBe('')
-  const optimizePanel = wrapper.get('#panel-optimize')
-  expect(optimizePanel.attributes('hidden')).toBeUndefined()
+  expect(wrapper.get('#pane-jobs').attributes('aria-hidden')).toBe('true')
+  const optimizePanel = wrapper.get('#pane-optimize')
+  expect(optimizePanel.attributes('aria-hidden')).toBe('false')
   expect(optimizePanel.text()).toContain('Key prefix')
   expect(optimizePanel.text()).toContain('Scan results')
   expect(optimizePanel.text()).toContain('Start job')
@@ -95,7 +132,7 @@ test('scan sends its prefix and refreshes the displayed results', async () => {
   expect(wrapper.text()).toContain('Scan prefix')
   await wrapper.get('#tab-optimize').trigger('keydown', { key: 'ArrowRight' })
   expect(wrapper.get('#tab-jobs').attributes('aria-selected')).toBe('true')
-  expect(wrapper.get('#panel-optimize').attributes('hidden')).toBe('')
+  expect(wrapper.get('#pane-optimize').attributes('aria-hidden')).toBe('true')
   await wrapper.get('#tab-jobs').trigger('keydown', { key: 'ArrowLeft' })
   expect(wrapper.get('#tab-optimize').attributes('aria-selected')).toBe('true')
   expect(button('Start job').attributes('disabled')).toBeDefined()
@@ -118,33 +155,32 @@ test('scan button shows a spinner only while the scan is queued or running', asy
     const scanButton = button('Scan in progress')
     expect(scanButton.attributes('disabled')).toBeDefined()
     expect(scanButton.attributes('aria-busy')).toBe('true')
-    expect(scanButton.find('span[aria-hidden="true"]').classes()).toContain('animate-spin')
+    expect(scanButton.classes()).toContain('is-loading')
   }
   data.overview.value.scan!.status = 'completed'
   await nextTick()
   expect(button('Start scan').attributes('aria-busy')).toBe('false')
-  expect(button('Start scan').find('span[aria-hidden="true"]').exists()).toBe(false)
+  expect(button('Start scan').classes()).not.toContain('is-loading')
   wrapper.unmount()
 })
 
 test('job start uses confirmation and submits the selected settings', async () => {
   setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 2, metadataErrorCount: 0, startedAt: null }, eligible: 2 })
-  const { wrapper, button, inputFor } = await renderPage()
+  const { wrapper, button, inputFor, checkboxFor, selectFor, rowCheckbox } = await renderPage()
   expect(wrapper.text()).not.toContain('Back up originals (required)')
   expect(wrapper.text()).toContain('Each original is backed up before replacement.')
-  const jobSection = wrapper.get('#panel-optimize')
+  const jobSection = wrapper.get('#pane-optimize')
   expect(jobSection.text()).toContain('Start job')
-  const scanCheckbox = wrapper.find('input[aria-label="Select photos/one.jpg"]')
+  const scanCheckbox = rowCheckbox('photos/one.jpg')
   expect(wrapper.text()).not.toContain('I understand qualifying originals')
   for (const label of ['Preserve photo metadata', 'Delete backup after successful optimization']) {
-    const checkbox = inputFor(label)
-    for (const style of ['h-5', 'w-5', 'cursor-pointer', 'accent-orange-600']) {
-      expect(checkbox.classes()).toContain(style)
-      expect(scanCheckbox.classes()).toContain(style)
-    }
+    const checkbox = checkboxFor(label)
+    expect(checkbox.attributes('type')).toBe('checkbox')
+    expect(checkbox.attributes('disabled')).toBeUndefined()
+    expect(scanCheckbox.attributes('type')).toBe('checkbox')
   }
-  expect(wrapper.get('#panel-optimize').text()).toContain('Minimum original size (MiB)')
-  expect((inputFor('Minimum original size').element as HTMLSelectElement).value).toBe('1')
+  expect(jobSection.text()).toContain('Minimum original size (MiB)')
+  expect(selectFor('Minimum original size').props('modelValue')).toBe(1)
   expect(button('Start job').attributes('disabled')).toBeDefined()
   await inputFor('Key prefix').setValue('photos/')
   await inputFor('Minimum original size').setValue('2')
@@ -152,37 +188,36 @@ test('job start uses confirmation and submits the selected settings', async () =
   await inputFor('Minimum saving').setValue('25')
   await inputFor('Preserve photo metadata').setValue(false)
   expect(button('Start job').attributes('disabled')).toBeDefined()
-  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
+  await rowCheckbox('photos/one.jpg').setValue(true)
   expect(wrapper.text()).toContain('1 selected')
   expect(jobSection.text()).not.toContain('selected for this job')
   expect(wrapper.get('#tab-optimize').text()).toContain('1')
   expect(button('Start job').attributes('disabled')).toBeUndefined()
   await button('Start job').trigger('click')
   await flushPromises()
-  expect(confirmJob).toHaveBeenCalledWith(expect.stringContaining('1 selected JPEG in test'))
+  expect(confirmJob.mock.calls[0]?.[0]).toEqual(expect.stringContaining('1 selected JPEG in test'))
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: {
     bucketId: 'default', scanId: 1, selectedKeys: ['photos/one.jpg'], prefix: 'photos/', minBytes: 2 * 1048576, preset: 'archival', minimumSavingPercent: 25,
     preserveMetadata: false, deleteBackupAfterOptimization: false,
   } })
   expect(refreshJobs).toHaveBeenCalledOnce()
-  expect(wrapper.get('#panel-jobs').attributes('hidden')).toBeUndefined()
+  expect(wrapper.get('#pane-jobs').attributes('aria-hidden')).toBe('false')
   expect(wrapper.get('#tab-jobs').attributes('aria-selected')).toBe('true')
   wrapper.unmount()
 })
 
 test('minimum original size dropdown offers every MiB from 1 to 20 and sends the chosen size', async () => {
   setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1, metadataErrorCount: 0, startedAt: null }, eligible: 1 })
-  const { wrapper, button, inputFor } = await renderPage()
-  const sizeSelect = inputFor('Minimum original size')
-  expect(sizeSelect.element.tagName).toBe('SELECT')
-  expect(sizeSelect.findAll('option').map(option => option.text())).toEqual(Array.from({ length: 20 }, (_, index) => `${index + 1} MiB`))
-  expect((sizeSelect.element as HTMLSelectElement).value).toBe('1')
-  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
-  await sizeSelect.setValue('20')
-  expect((sizeSelect.element as HTMLSelectElement).value).toBe('20')
+  const { wrapper, button, inputFor, selectFor, rowCheckbox } = await renderPage()
+  const sizeSelect = selectFor('Minimum original size')
+  expect(sizeSelect.findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toEqual(Array.from({ length: 20 }, (_, index) => `${index + 1} MiB`))
+  expect(sizeSelect.props('modelValue')).toBe(1)
+  await rowCheckbox('photos/one.jpg').setValue(true)
+  await inputFor('Minimum original size').setValue('20')
+  expect(sizeSelect.props('modelValue')).toBe(20)
   expect(wrapper.text()).toContain('0 selected')
   expect(button('Start job').attributes('disabled')).toBeDefined()
-  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
+  await rowCheckbox('photos/one.jpg').setValue(true)
   expect(button('Start job').attributes('disabled')).toBeUndefined()
   await button('Start job').trigger('click')
   await flushPromises()
@@ -193,13 +228,13 @@ test('minimum original size dropdown offers every MiB from 1 to 20 and sends the
 test('canceling the start-job confirmation leaves the selection and does not create a job', async () => {
   setupData({ scan: { id: 1, bucketId: 'default', status: 'completed', prefix: '', discoveredCount: 1,
     metadataErrorCount: 0, startedAt: null }, eligible: 1 })
-  confirmJob.mockReturnValueOnce(false)
-  const { wrapper, button, inputFor } = await renderPage()
-  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
+  confirmJob.mockRejectedValueOnce('cancel')
+  const { wrapper, button, rowCheckbox } = await renderPage()
+  await rowCheckbox('photos/one.jpg').setValue(true)
   await button('Start job').trigger('click')
-  expect(confirmJob).toHaveBeenCalledWith(expect.stringContaining('Are you sure'))
+  expect(confirmJob.mock.calls[0]?.[0]).toEqual(expect.stringContaining('Are you sure'))
   expect(post).not.toHaveBeenCalledWith('/api/jobs', expect.anything())
-  expect((wrapper.find('input[aria-label="Select photos/one.jpg"]').element as HTMLInputElement).checked).toBe(true)
+  expect((wrapper.get('[aria-label="Select photos/one.jpg"] input').element as HTMLInputElement).checked).toBe(true)
   wrapper.unmount()
 })
 
@@ -234,8 +269,8 @@ test('jobs panel lists the current job together with earlier runs', async () => 
     originalBytes: 80, finalBytes: 80, savedBytes: 0, savedPercent: 0, current: null, nextRetryAt: null,
   })
   const { wrapper, button, inputFor } = await renderPage()
-  const jobs = wrapper.get('#panel-jobs')
-  const optimize = wrapper.get('#panel-optimize')
+  const jobs = wrapper.get('#pane-jobs')
+  const optimize = wrapper.get('#pane-optimize')
   expect(optimize.text()).not.toContain('Job #1')
   expect(jobs.text()).toContain('Job #1')
   expect(jobs.text()).toContain('Job #2')
@@ -252,7 +287,7 @@ test('jobs panel lists the current job together with earlier runs', async () => 
   expect(jobs.text()).not.toContain('Job #8')
   await inputFor('R2 bucket').setValue('media')
   await nextTick()
-  const mediaJobs = wrapper.get('#panel-jobs')
+  const mediaJobs = wrapper.get('#pane-jobs')
   expect(mediaJobs.text()).toContain('Job #8')
   expect(mediaJobs.text()).not.toContain('Job #1')
   expect(wrapper.text()).toContain('bucket: missing')
@@ -309,17 +344,17 @@ test('backup cleanup is opt-in while required backup creation stays implicit', a
     metadataErrorCount: 0, startedAt: null }, eligible: 1 })
   const { wrapper, button, inputFor } = await renderPage()
   const deletion = inputFor('Delete backup after successful optimization')
-  const tooltip = wrapper.find('#backup-deletion-help')
-  expect(wrapper.find('button[aria-label="About backup deletion"]').attributes('aria-describedby')).toBe('backup-deletion-help')
-  expect(tooltip.text()).toContain('You will no longer have a restore copy.')
-  expect(tooltip.classes()).toContain('group-hover:visible')
-  expect(tooltip.classes()).toContain('group-focus-within:visible')
+  const tooltip = wrapper.findAllComponents({ name: 'ElTooltip' }).find(item => String(item.props('content') ?? '').includes('restore copy'))
+  if (!tooltip) throw new Error('Backup deletion tooltip not found')
+  expect(wrapper.find('button[aria-label="About backup deletion"]').exists()).toBe(true)
+  expect(tooltip.props('content')).toContain('You will no longer have a restore copy.')
+  expect(tooltip.props('trigger')).toEqual(['hover', 'focus'])
   expect((deletion.element as HTMLInputElement).checked).toBe(false)
   await deletion.setValue(true)
-  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
+  await wrapper.get('[aria-label="Select photos/one.jpg"] input').setValue(true)
   await button('Start job').trigger('click')
   await flushPromises()
-  expect(confirmJob).toHaveBeenCalledWith(expect.stringContaining('Original backups will be deleted after each optimized image is verified.'))
+  expect(confirmJob.mock.calls[0]?.[0]).toEqual(expect.stringContaining('Original backups will be deleted after each optimized image is verified.'))
   expect(post).toHaveBeenCalledWith('/api/jobs', { method: 'POST', body: expect.objectContaining({
     deleteBackupAfterOptimization: true,
   }) })
@@ -331,17 +366,17 @@ test('selection persists across pages and clears when filters change', async () 
     metadataErrorCount: 0, startedAt: null }, eligible: 2 })
   data.objects.value.total = 200
   const { wrapper, button, inputFor } = await renderPage()
-  await wrapper.find('input[aria-label="Select photos/one.jpg"]').setValue(true)
+  await wrapper.get('[aria-label="Select photos/one.jpg"] input').setValue(true)
   expect(wrapper.text()).toContain('1 selected')
   await button('Next').trigger('click')
   data.objects.value.items = [{ ...data.objects.value.items[0]!, key: 'photos/two.jpg' }]
   await nextTick()
-  await wrapper.find('input[aria-label="Select photos/two.jpg"]').setValue(true)
+  await wrapper.get('[aria-label="Select photos/two.jpg"] input').setValue(true)
   expect(wrapper.text()).toContain('2 selected')
   await button('Previous').trigger('click')
   data.objects.value.items = [{ ...data.objects.value.items[0]!, key: 'photos/one.jpg' }]
   await nextTick()
-  expect((wrapper.find('input[aria-label="Select photos/one.jpg"]').element as HTMLInputElement).checked).toBe(true)
+  expect((wrapper.get('[aria-label="Select photos/one.jpg"] input').element as HTMLInputElement).checked).toBe(true)
   await inputFor('Key prefix').setValue('other/')
   expect(wrapper.text()).toContain('0 selected')
   expect(button('Start job').attributes('disabled')).toBeDefined()
@@ -355,8 +390,8 @@ test('page selection excludes optimized and unknown objects', async () => {
   data.objects.value.items = [eligible, { ...eligible, key: 'photos/done.jpg', isOptimized: true },
     { ...eligible, key: 'photos/unknown.jpg', metadataStatus: 'unknown' }]
   const { wrapper, button } = await renderPage()
-  expect(wrapper.find('input[aria-label="Select photos/done.jpg"]').attributes('disabled')).toBeDefined()
-  expect(wrapper.find('input[aria-label="Select photos/unknown.jpg"]').attributes('disabled')).toBeDefined()
+  expect(wrapper.get('[aria-label="Select photos/done.jpg"] input').attributes('disabled')).toBeDefined()
+  expect(wrapper.get('[aria-label="Select photos/unknown.jpg"] input').attributes('disabled')).toBeDefined()
   await button('Select eligible on this page').trigger('click')
   expect(wrapper.text()).toContain('1 selected')
   await button('Deselect this page').trigger('click')
@@ -370,13 +405,12 @@ test('clicking an eligible row toggles selection without preview or checkbox dou
   const eligible = data.objects.value.items[0]!
   data.objects.value.items = [eligible, { ...eligible, key: 'photos/done.jpg', isOptimized: true }]
   const { wrapper } = await renderPage()
-  expect(wrapper.findAll('thead th').map(cell => cell.text())).toEqual([
+  expect(wrapper.findAll('thead th').map(cell => cell.text()).filter(text => text.length > 0)).toEqual([
     'Select', 'Object key', 'Original size', 'Last modified', 'Status', 'Saving', 'Preview',
   ])
-  const rows = wrapper.findAll('tbody tr')
+  const rows = wrapper.findAll('tbody tr.el-table__row')
   const checkbox = rows[0]!.find('input[type="checkbox"]')
-  expect(checkbox.classes()).toContain('h-5')
-  expect(checkbox.classes()).toContain('w-5')
+  expect(checkbox.attributes('type')).toBe('checkbox')
   await rows[0]!.findAll('td')[1]!.trigger('click')
   expect((checkbox.element as HTMLInputElement).checked).toBe(true)
   await rows[0]!.find('button[aria-label="Show preview of photos/one.jpg"]').trigger('click')
