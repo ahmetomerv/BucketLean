@@ -9,6 +9,8 @@
 
 BucketLean helps you find and shrink JPEGs across one or more R2 buckets. Scan first, choose the images to optimize, and follow each job in a private dashboard. You can also use its HTTP API for automation.
 
+![BucketLean dashboard showing a completed R2 scan and JPEG candidates](public/demo.png)
+
 [Get started](docs/guide/getting-started.md) · [Documentation](docs/index.md) · [HTTP API](docs/api/index.md)
 
 ## Features
